@@ -46,6 +46,7 @@ app.get("/admin/crawl-now", async (_req, res) => {
   console.log("🔄 Puppeteer 크롤링 시작...");
   let browser;
   try {
+    console.log("🧭 Chrome Path:", process.env.PUPPETEER_EXECUTABLE_PATH);
     browser = await puppeteer.launch({
        headless: "new",
   executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,    
