@@ -1,24 +1,22 @@
-name: Crawl runes and update JSON
-
-on:
-  schedule:
-    - cron: "0 19 * * *"  # 매일 오전 4시 (KST)
-  workflow_dispatch:
-
-jobs:
-  crawl:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
-        with:
-          node-version: 20
-      - run: npm install
-      - run: node crawler.js
-      - name: Commit JSON
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add runes.json
-          git commit -m "Auto update runes.json [skip ci]" || echo "No changes"
-          git push
+# name: Crawl runes and update JSON
+# on:
+#   workflow_dispatch:
+#   schedule:
+#     - cron: "0 0 * * *"
+# jobs:
+#   crawl:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v3
+#       - uses: actions/setup-node@v3
+#         with:
+#           node-version: 20
+#       - run: npm install
+#       - run: node crawler.js
+#       - name: Commit JSON
+#         run: |
+#           git config --global user.name "github-actions"
+#           git config --global user.email "actions@github.com"
+#           git add runes.json
+#           git commit -m "Auto update runes.json" || echo "No changes"
+#           git push
