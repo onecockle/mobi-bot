@@ -40,17 +40,16 @@ async function crawlRunes() {
     timeout: 180000,
   });
 
-  // Cloudflare 회피용 대기 (기존 waitForTimeout 제거)
+  // Cloudflare 회피용 대기 (waitForTimeout 대신 안전한 setTimeout)
   await new Promise((resolve) => setTimeout(resolve, 7000)); // 7초 대기
 
-  // "룬" 테이블이 나타날 때까지 최대 30초 대기
+  // 룬 테이블 나타날 때까지 대기
   try {
-    await page.waitForSelector("table tbody tr", { timeout: 30000 });
+    await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 30000 });
   } catch (e) {
     throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
   }
 
-  // HTML 확인
   const html = await page.content();
   if (html.includes("Just a moment")) {
     throw new Error("Cloudflare challenge detected. Try again later.");
@@ -60,13 +59,21 @@ async function crawlRunes() {
 
   // ====== 룬 테이블 크롤링 ======
   const runeData = await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll("table tbody tr"));
+    const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
     return rows.map((row) => {
-      const img = row.querySelector("img")?.src || "";
-      const category = row.children[1]?.innerText.trim();
-      const name = row.children[2]?.innerText.trim();
-      const grade = row.children[3]?.innerText.trim();
-      const effect = row.children[4]?.innerText.trim();
+      const imgTag = row.querySelector("img");
+      const img = imgTag
+        ? imgTag.src.replace(/^\/_next\/image\?url=/, "https://mabimobi.life/_next/image?url=")
+        : "";
+
+      const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
+      const name =
+        row.querySelector("td:nth-child(3) span.text-[rgba(235,165,24,1)]")?.innerText.trim() ||
+        row.querySelector("td:nth-child(3) span:last-child")?.innerText.trim() ||
+        "";
+      const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
+      const effect = row.querySelectorAll("td")[4]?.innerText.trim() || "";
+
       return { name, category, grade, effect, img };
     });
   });
