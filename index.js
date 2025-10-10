@@ -67,10 +67,13 @@ async function crawlRunes() {
         : "";
 
       const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
-      const name =
-        row.querySelector("td:nth-child(3) span.text-[rgba(235,165,24,1)]")?.innerText.trim() ||
-        row.querySelector("td:nth-child(3) span:last-child")?.innerText.trim() ||
-        "";
+
+      // ✅ Tailwind 대괄호 속성 클래스 문제 해결
+      const nameEl =
+        row.querySelector("td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']") ||
+        row.querySelector("td:nth-child(3) span:last-child");
+      const name = nameEl ? nameEl.innerText.trim() : "";
+
       const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
       const effect = row.querySelectorAll("td")[4]?.innerText.trim() || "";
 
