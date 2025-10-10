@@ -34,18 +34,29 @@ async function crawlRunes() {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
   );
 
-  // 페이지 이동 (Cloudflare 대기 포함)
+  console.log("🌐 사이트 접속 중...");
   await page.goto("https://mabimobi.life/runes?t=search", {
     waitUntil: "domcontentloaded",
     timeout: 180000,
   });
 
-  await new Promise((r) => setTimeout(r, 5000)); // Cloudflare 우회용 대기
+  // Cloudflare 회피용 대기 (기존 waitForTimeout 제거)
+  await new Promise((resolve) => setTimeout(resolve, 7000)); // 7초 대기
 
+  // "룬" 테이블이 나타날 때까지 최대 30초 대기
+  try {
+    await page.waitForSelector("table tbody tr", { timeout: 30000 });
+  } catch (e) {
+    throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
+  }
+
+  // HTML 확인
   const html = await page.content();
   if (html.includes("Just a moment")) {
     throw new Error("Cloudflare challenge detected. Try again later.");
   }
+
+  console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
 
   // ====== 룬 테이블 크롤링 ======
   const runeData = await page.evaluate(() => {
