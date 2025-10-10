@@ -40,8 +40,9 @@ async function crawlRunes() {
     fs.writeFileSync("runes.json", JSON.stringify(runes, null, 2), "utf8");
     console.log(`✅ ${runes.length}개의 룬 정보를 저장했습니다.`);
   } catch (err) {
-    console.error("⚠️ 오류 발생:", err.message);
-  }
+  console.error("⚠️ 오류 발생:", err);
+  process.exit(1);
+}
 }
 
 crawlRunes();
