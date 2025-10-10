@@ -1,0 +1,16 @@
+{
+  "name": "mobi-bot",
+  "version": "1.0.0",
+  "description": "Mabinogi rune crawler and JSON generator",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "crawl": "node crawler.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
+    "express": "^4.18.2"
+  }
+}
