@@ -40,7 +40,7 @@ async function crawlRunes() {
     timeout: 180000,
   });
 
-  await page.waitForTimeout(5000); // Cloudflare 우회용 대기
+  await new Promise((r) => setTimeout(r, 5000)); // Cloudflare 우회용 대기
 
   const html = await page.content();
   if (html.includes("Just a moment")) {
