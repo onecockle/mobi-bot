@@ -1,35 +1,82 @@
 import express from "express";
 import fs from "fs";
-import axios from "axios";
+import path from "path";
 import * as cheerio from "cheerio";
+import puppeteer from "puppeteer";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ✅ 마비노기 룬 목록 페이지
 const TARGET_URL = "https://mabimobi.life/runes?t=search";
+const DATA_FILE = path.join(process.cwd(), "runes.json");
 
-// 기본 루트 상태 확인용
-app.get("/", (req, res) => {
-  res.send("Kakao Rune Bot (Render 크롤링 버전) is running.<br>GET /admin/crawl-now 로 룬정보 갱신 가능");
+// 메모리 캐시
+let RUNES = [];
+let lastLoadedAt = null;
+
+// 헬퍼: 로컬 runes.json 로드
+function loadLocalJSON() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, "utf-8");
+      RUNES = JSON.parse(raw);
+      lastLoadedAt = new Date().toISOString();
+      console.log(`📦 로컬 runes.json 로드 완료: ${RUNES.length}개`);
+    } else {
+      console.log("⚠️ runes.json이 아직 없습니다. /admin/crawl-now 로 생성하세요.");
+    }
+  } catch (e) {
+    console.error("❌ runes.json 로드 오류:", e.message);
+  }
+}
+loadLocalJSON();
+
+// 상태
+app.get("/", (_req, res) => {
+  res.send(
+    "Kakao Rune Bot (Puppeteer ver) is running.<br>" +
+      "GET /admin/crawl-now → 최신 룬 데이터 수집<br>" +
+      "GET /runes?name=무한 → 룬 검색<br>" +
+      `items=${RUNES.length}, lastLoadedAt=${lastLoadedAt ?? "N/A"}`
+  );
 });
 
-// ✅ 크롤링 엔드포인트
-app.get("/admin/crawl-now", async (req, res) => {
+// 🔥 핵심: Puppeteer로 크롤링
+app.get("/admin/crawl-now", async (_req, res) => {
+  console.log("🔄 Puppeteer 크롤링 시작...");
+  let browser;
   try {
-    console.log("🌀 마비노기 룬 목록 수집 중...");
-
-    // Cloudflare 우회 User-Agent 헤더 설정
-    const { data } = await axios.get(TARGET_URL, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-        "Accept-Language": "ko,en;q=0.9",
-      },
-      timeout: 20000,
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--no-zygote",
+        "--single-process"
+      ]
     });
 
-    const $ = cheerio.load(data);
+    const page = await browser.newPage();
+
+    // 브라우저 헤더를 실제 유저처럼
+    await page.setExtraHTTPHeaders({
+      "Accept":
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+      "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+    });
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    );
+
+    await page.goto(TARGET_URL, { waitUntil: "networkidle2", timeout: 60000 });
+
+    // Cloudflare가 로딩을 지연시키는 경우 대비: 실제 테이블 로드될 때까지 대기
+    await page.waitForSelector("tr[data-slot='table-row']", { timeout: 60000 });
+
+    // HTML 가져와서 cheerio로 파싱
+    const html = await page.content();
+    const $ = cheerio.load(html);
     const runes = [];
 
     $("tr[data-slot='table-row']").each((i, el) => {
@@ -37,25 +84,52 @@ app.get("/admin/crawl-now", async (req, res) => {
       const grade = $(el).find("td:nth-child(4)").text().trim();
       const desc = $(el).find("td:nth-child(5) span").text().trim();
 
-      let img = $(el).find("img").attr("src");
-      if (img && img.startsWith("/"))
-        img = "https://mabimobi.life" + img;
+      let img = $(el).find("img").attr("src") || "";
+      if (img && img.startsWith("/")) img = "https://mabimobi.life" + img;
 
-      if (name)
+      if (name) {
         runes.push({ name, grade, desc, img });
+      }
     });
 
-    if (runes.length === 0) throw new Error("룬 데이터를 찾지 못했습니다.");
+    await browser.close();
 
-    fs.writeFileSync("runes.json", JSON.stringify(runes, null, 2));
-    console.log(`✅ ${runes.length}개의 룬 정보를 저장했습니다.`);
+    if (runes.length === 0) {
+      throw new Error("룬 데이터를 하나도 찾지 못했습니다. 페이지 구조를 다시 확인하세요.");
+    }
 
-    res.json({ ok: true, count: runes.length });
-  } catch (err) {
-    console.error("❌ 크롤링 오류:", err.message);
-    res.status(500).json({ ok: false, error: err.message });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(runes, null, 2));
+    RUNES = runes;
+    lastLoadedAt = new Date().toISOString();
+
+    console.log(`✅ ${RUNES.length}개의 룬을 저장했습니다.`);
+    return res.json({ ok: true, count: RUNES.length, lastLoadedAt });
+  } catch (e) {
+    console.error("❌ 크롤링 실패:", e.message);
+    if (browser) await browser.close().catch(() => {});
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// 서버 시작
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+// 룬 검색 API (띄어쓰기 무시, 부분일치)
+function norm(s = "") {
+  return s.replace(/\s+/g, "").toLowerCase();
+}
+app.get("/runes", (req, res) => {
+  const q = (req.query.name || "").toString().trim();
+  if (!q) return res.status(400).json({ ok: false, error: "name 쿼리를 넣어주세요" });
+
+  const nq = norm(q);
+  const hits = RUNES.filter(r => norm(r.name).includes(nq));
+
+  if (hits.length === 0) return res.json({ ok: true, count: 0, items: [] });
+  return res.json({
+    ok: true,
+    count: hits.length,
+    items: hits.slice(0, 10) // 너무 많으면 10개만
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ Server running on :${PORT}`);
+});
