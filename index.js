@@ -180,8 +180,8 @@ app.get("/ask", async (req, res) => {
 ${mythicLegendRunes}
 
 공식 정보처럼 정확하게 설명하되, 문장은 귀엽고 친근하게 써.
-문장 끝을 가끔씩 '뇽'으로 말해. (예: "그렇다뇽!", "그렇구나뇽~")
-너한테 반말로 물어보면 반말로 대답하고, 존댓말로 물어보면 존댓말로 대답해.
+가끔 문장 끝에만 ‘뇽’을 붙여 말해도 좋아. 예를 들어 "좋아요!" → "좋다뇽!" 정도로.  
+단, 모든 문장에 뇽체를 쓰지 말고, 상황에 맞게 자연스럽게 섞어서 사용해.
 너는 퉁명스럽지만 장난끼많고 귀여운 캐릭터야.
 게임, 생활, 취미 등 다양한 주제에서 짧게 대답해.
 답변은 100자 이내로, 문체는 자연스럽고 너무 인위적이지 않게 써.
@@ -215,7 +215,102 @@ ${mythicLegendRunes}
     res.json({ ok: false, error: err.message });
   }
 });
+// =======================
+// 🔹 마비노기모바일 공식 소식 크롤러
+// =======================
+const NEWS_URLS = {
+  notice:      "https://mabinogimobile.nexon.com/News/Notice",
+  event:       "https://mabinogimobile.nexon.com/News/Events?headlineId=2501",
+  update:      "https://mabinogimobile.nexon.com/News/Update",
+  devnote:     "https://mabinogimobile.nexon.com/News/Devnote",
+  improvement: "https://mabinogimobile.nexon.com/News/Improvement",
+};
 
+async function crawlNews(type = "notice", limit = 5) {
+  if (!Object.keys(NEWS_URLS).includes(type)) {
+    throw new Error(`Invalid type. use one of: ${Object.keys(NEWS_URLS).join(", ")}`);
+  }
+  const url = NEWS_URLS[type];
+  console.log(`📡 [NEWS] ${type.toUpperCase()} → ${url}`);
+
+  const browser = await puppeteer.launch({
+    headless: "new",
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
+
+  const page = await browser.newPage();
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+  );
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+
+  const selectorsToTry = [
+    ".list_notice tbody tr",
+    "table tbody tr",
+    "ul li",
+    "ol li",
+    ".board_list li",
+    ".news_list li",
+  ];
+  let rowsFound = false;
+  for (const sel of selectorsToTry) {
+    try {
+      await page.waitForSelector(sel, { timeout: 6000 });
+      rowsFound = true;
+      break;
+    } catch (_) {}
+  }
+  if (!rowsFound) {
+    await browser.close();
+    throw new Error("목록을 찾지 못했어요 (페이지 구조 변경 가능)");
+  }
+
+  const items = await page.evaluate((limit) => {
+    const anchors = Array.from(document.querySelectorAll("a"))
+      .filter(a => a.href && a.href.includes("mabinogimobile.nexon.com/News"))
+      .map(a => ({
+        title: (a.innerText || "").trim().replace(/\s+/g, " "),
+        link: a.href,
+        date:
+          (a.closest("tr")?.querySelector(".date")?.innerText ||
+           a.parentElement?.querySelector(".date")?.innerText ||
+           a.closest("li")?.querySelector(".date")?.innerText ||
+           a.closest("tr")?.querySelector("td:last-child")?.innerText ||
+           "").trim().replace(/\s+/g, " "),
+      }))
+      .filter(x => x.title && x.link);
+
+    const seen = new Set();
+    const uniq = [];
+    for (const it of anchors) {
+      const key = it.title + "@" + it.link;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniq.push(it);
+      }
+      if (uniq.length >= limit) break;
+    }
+    return uniq;
+  }, limit);
+
+  await browser.close();
+  console.log(`✅ [NEWS] ${type} ${items.length}개`);
+  return items;
+}
+
+// 🔸 /news 엔드포인트
+app.get("/news", async (req, res) => {
+  const type = (req.query.type || "notice").toLowerCase();
+  const limit = Math.min(parseInt(req.query.limit || "5", 10) || 5, 10);
+  try {
+    const news = await crawlNews(type, limit);
+    res.json({ ok: true, type, count: news.length, news });
+  } catch (err) {
+    console.error("❌ 뉴스 크롤 실패:", err.message);
+    res.json({ ok: false, error: err.message });
+  }
+});
 
 
 // =======================
