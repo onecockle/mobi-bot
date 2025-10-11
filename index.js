@@ -1,105 +1,82 @@
 // =======================
-// index.js — 완벽 통합 안정 버전 (Render 호환)
+// index.js (수동 크롤링 전용 안정 버전)
 // =======================
 
 import express from "express";
-import puppeteer from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import puppeteer from "puppeteer";
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 
-puppeteer.use(StealthPlugin());
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 절대경로 세팅
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const RUNES_FILE = path.join(__dirname, "runes.json");
-
-// 메모리 캐시
 let runeCache = [];
 let lastLoadedAt = null;
-
-// =======================
-// 🧩 유틸: 로드 / 저장
-// =======================
-function loadRunesFromDisk() {
-  try {
-    if (fs.existsSync(RUNES_FILE)) {
-      const raw = fs.readFileSync(RUNES_FILE, "utf-8");
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) {
-        runeCache = arr;
-        lastLoadedAt = new Date().toISOString();
-        console.log(`📥 runes.json 로드 완료: ${runeCache.length}개`);
-        return true;
-      }
-    }
-  } catch (e) {
-    console.warn("⚠️ runes.json 로드 실패:", e.message);
-  }
-  return false;
-}
-
-function saveRunesToDisk(list) {
-  fs.writeFileSync(RUNES_FILE, JSON.stringify(list, null, 2), "utf-8");
-  console.log(`💾 runes.json 저장 완료 (${list.length}개)`);
-}
-
-// 서버 시작 시 로드 시도
-loadRunesFromDisk();
 
 // =======================
 // 🔄 룬 크롤링 함수
 // =======================
 async function crawlRunes() {
   console.log("🔄 Puppeteer 크롤링 시작...");
+  console.log("🧭 Chrome Path:", process.env.PUPPETEER_EXECUTABLE_PATH);
 
   const browser = await puppeteer.launch({
     headless: "new",
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-extensions",
       "--disable-gpu",
-      "--window-size=1280,720",
+      "--single-process",
     ],
   });
 
   const page = await browser.newPage();
   await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
   );
 
   console.log("🌐 사이트 접속 중...");
   await page.goto("https://mabimobi.life/runes?t=search", {
-    waitUntil: "networkidle2",
+    waitUntil: "domcontentloaded",
     timeout: 180000,
   });
 
-  console.log("⏳ Cloudflare 대기중 (10초)...");
-  await new Promise((resolve) => setTimeout(resolve, 10000));
+  // Cloudflare 회피 대기
+  await new Promise((resolve) => setTimeout(resolve, 7000));
 
   try {
-    await page.waitForSelector("tr[data-slot='table-row']", { timeout: 60000 });
+    await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 40000 });
   } catch (e) {
-    await browser.close();
-    throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 구조 변경)");
+    throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
+  }
+
+  const html = await page.content();
+  if (html.includes("Just a moment")) {
+    throw new Error("⚠️ Cloudflare challenge detected. Try again later.");
   }
 
   console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
+
   const runeData = await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll("tr[data-slot='table-row']"));
+    const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
     return rows.map((row) => {
       const imgTag = row.querySelector("img");
-      const img = imgTag ? imgTag.src : "";
+      const img = imgTag
+        ? imgTag.src.replace(/^\/_next\/image\?url=/, "https://mabimobi.life/_next/image?url=")
+        : "";
+
       const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
-      const name = row.querySelector("td:nth-child(3) span")?.innerText.trim() || "";
+
+      const nameEl =
+        row.querySelector("td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']") ||
+        row.querySelector("td:nth-child(3) span:last-child");
+      const name = nameEl ? nameEl.innerText.trim() : "";
+
       const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
       const effect = row.querySelectorAll("td")[4]?.innerText.trim() || "";
+
       return { name, category, grade, effect, img };
     });
   });
@@ -108,9 +85,10 @@ async function crawlRunes() {
 
   runeCache = runeData;
   lastLoadedAt = new Date().toISOString();
-  saveRunesToDisk(runeData);
 
+  fs.writeFileSync("runes.json", JSON.stringify(runeData, null, 2));
   console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
+
   return runeData.length;
 }
 
@@ -118,120 +96,71 @@ async function crawlRunes() {
 // 🧩 API 라우트
 // =======================
 
-// 수동 룬 크롤링
+// 🔹 수동 크롤링 실행
 app.get("/admin/crawl-now", async (req, res) => {
   try {
     const count = await crawlRunes();
-    res.json({ ok: true, count, message: `${count}개의 룬 데이터 저장 완료` });
+    res.json({ ok: true, count, message: `${count}개의 룬 데이터가 새로 저장되었습니다.` });
   } catch (error) {
     console.error("❌ 크롤링 실패:", error);
     res.json({ ok: false, error: error.message });
   }
 });
 
-// 룬 검색
+// 🔹 룬 검색
 app.get("/runes", (req, res) => {
   const name = req.query.name?.trim();
   if (!name) return res.json({ ok: false, error: "name parameter required" });
 
-  if (!runeCache.length) loadRunesFromDisk();
-
   const normalizedQuery = name.replace(/\s+/g, "").toLowerCase();
-  const matches = runeCache.filter((r) =>
-    r.name.replace(/\s+/g, "").toLowerCase().includes(normalizedQuery)
-  );
 
-  if (!matches.length) return res.json({ ok: false, error: "Not found" });
+  const matches = runeCache.filter((r) => {
+    const normalizedRune = r.name.replace(/\s+/g, "").toLowerCase();
+    return normalizedRune.includes(normalizedQuery);
+  });
+
+  if (matches.length === 0) {
+    return res.json({ ok: false, error: "Not found" });
+  }
 
   const main = matches[0];
   res.json({ ok: true, rune: main, count: matches.length });
 });
 
-// 상태 확인
+// 🔹 서버 상태
 app.get("/health", (req, res) => {
-  let diskCount = null;
-  try {
-    if (fs.existsSync(RUNES_FILE)) {
-      const raw = fs.readFileSync(RUNES_FILE, "utf-8");
-      const arr = JSON.parse(raw);
-      diskCount = Array.isArray(arr) ? arr.length : null;
-    }
-  } catch (_) {}
   res.json({
     ok: true,
-    memoryItems: runeCache.length,
-    diskItems: diskCount,
+    items: runeCache.length,
     lastLoadedAt,
   });
 });
 
-// 디스크에서 강제 로드
-app.get("/admin/reload-runes", (req, res) => {
-  const ok = loadRunesFromDisk();
-  res.json({ ok, memoryItems: runeCache.length, lastLoadedAt });
-});
+// 🔹 Gemini AI 프록시
+app.get("/ask", async (req, res) => {
+  const question = req.query.question;
+  if (!question) return res.json({ ok: false, error: "question parameter required" });
 
-// =======================
-// 📰 마비노기 모바일 뉴스 크롤링
-// =======================
-const NEWS_URLS = {
-  notice: "https://mabinogimobile.nexon.com/News/Notice",
-  event: "https://mabinogimobile.nexon.com/News/Events?headlineId=2501",
-  update: "https://mabinogimobile.nexon.com/News/Update",
-  devnote: "https://mabinogimobile.nexon.com/News/Devnote",
-  improvement: "https://mabinogimobile.nexon.com/News/Improvement",
-};
-
-async function crawlNews(type = "notice", limit = 5) {
-  const url = NEWS_URLS[type];
-  if (!url) throw new Error("잘못된 뉴스 타입");
-
-  const browser = await puppeteer.launch({
-    headless: "new",
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
-  const page = await browser.newPage();
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
-
-  const items = await page.evaluate((limit) => {
-    const anchors = Array.from(document.querySelectorAll("a"))
-      .filter((a) => a.href && a.href.includes("mabinogimobile.nexon.com/News"))
-      .map((a) => ({
-        title: (a.innerText || "").trim().replace(/\s+/g, " "),
-        link: a.href,
-      }))
-      .filter((x) => x.title && x.link)
-      .slice(0, limit);
-    return anchors;
-  }, limit);
-
-  await browser.close();
-  console.log(`✅ [NEWS:${type}] ${items.length}개`);
-  return items;
-}
-
-app.get("/news", async (req, res) => {
-  const type = (req.query.type || "notice").toLowerCase();
-  const limit = Math.min(parseInt(req.query.limit || "5", 10), 10);
   try {
-    const news = await crawlNews(type, limit);
-    res.json({ ok: true, type, count: news.length, news });
+    const apiUrl =
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
+      process.env.GEMINI_API_KEY;
+
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: question }] }],
+      }),
+    });
+
+    const data = await response.json();
+    const answer = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "응답이 없어요.";
+
+    res.json({ ok: true, answer });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
-});
-
-// 뉴스 수동 전체 갱신
-app.get("/admin/news-now", async (req, res) => {
-  const results = {};
-  for (const type of Object.keys(NEWS_URLS)) {
-    try {
-      results[type] = await crawlNews(type, 5);
-    } catch (err) {
-      results[type] = { error: err.message };
-    }
-  }
-  res.json({ ok: true, updatedAt: new Date().toISOString(), results });
 });
 
 // =======================
@@ -239,5 +168,5 @@ app.get("/admin/news-now", async (req, res) => {
 // =======================
 app.listen(PORT, async () => {
   console.log(`✅ Server running on :${PORT}`);
-  console.log("💤 자동 크롤링 비활성화 — 수동 실행만 허용됩니다.");
+  console.log("💤 자동 크롤링 비활성화됨 — 수동 실행만 허용됩니다.");
 });
