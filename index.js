@@ -3,9 +3,11 @@
 // =======================
 
 import express from "express";
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import fs from "fs";
 
+puppeteer.use(StealthPlugin());
 const app = express();
 const PORT = process.env.PORT || 10000;
 
@@ -38,7 +40,7 @@ async function crawlRunes() {
   console.log("🧭 Chrome Path:", process.env.PUPPETEER_EXECUTABLE_PATH);
 
   const browser = await puppeteer.launch({
-    headless: false, // 👈 반드시 false로 (탐지 방지)
+    headless: "new", 
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
     args: [
       "--no-sandbox",
