@@ -126,6 +126,31 @@ app.get("/health", (req, res) => {
     lastLoadedAt,
   });
 });
+app.get("/ask", async (req, res) => {
+  const question = req.query.question || "Hello Gemini!";
+  const apiKey = process.env.GEMINI_API_KEY;
+  const model = "gemini-2.5-flash";
+
+  try {
+    const result = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: question }] }]
+        })
+      }
+    );
+
+    const json = await result.json();
+    const answer = json?.candidates?.[0]?.content?.parts?.[0]?.text || "응답이 없습니다.";
+    res.json({ ok: true, answer });
+  } catch (err) {
+    console.error("❌ Gemini 요청 실패:", err);
+    res.json({ ok: false, error: err.message });
+  }
+});
 
 // 서버 시작
 app.listen(PORT, async () => {
@@ -135,4 +160,5 @@ app.listen(PORT, async () => {
   } catch (err) {
     console.error("⚠️ 초기 크롤 실패:", err.message);
   }
+
 });
