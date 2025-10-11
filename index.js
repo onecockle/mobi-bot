@@ -1,4 +1,7 @@
-// index.js
+// =======================
+// index.js (수동 크롤링 전용 안정 버전)
+// =======================
+
 import express from "express";
 import puppeteer from "puppeteer";
 import fs from "fs";
@@ -10,7 +13,7 @@ let runeCache = [];
 let lastLoadedAt = null;
 
 // =======================
-// 🔄 크롤링 함수
+// 🔄 룬 크롤링 함수
 // =======================
 async function crawlRunes() {
   console.log("🔄 Puppeteer 크롤링 시작...");
@@ -40,19 +43,19 @@ async function crawlRunes() {
     timeout: 180000,
   });
 
-  // Cloudflare 회피용 대기 (waitForTimeout 대신 안전한 setTimeout)
-  await new Promise((resolve) => setTimeout(resolve, 7000)); // 7초 대기
+  // Cloudflare 회피 대기
+  await new Promise((resolve) => setTimeout(resolve, 7000));
 
-  // 룬 테이블 나타날 때까지 대기
+  // 룬 테이블 로드 대기
   try {
-    await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 30000 });
+    await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 40000 });
   } catch (e) {
     throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
   }
 
   const html = await page.content();
   if (html.includes("Just a moment")) {
-    throw new Error("Cloudflare challenge detected. Try again later.");
+    throw new Error("⚠️ Cloudflare challenge detected. Try again later.");
   }
 
   console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
@@ -68,7 +71,6 @@ async function crawlRunes() {
 
       const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
 
-      // ✅ Tailwind 대괄호 속성 클래스 문제 해결
       const nameEl =
         row.querySelector("td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']") ||
         row.querySelector("td:nth-child(3) span:last-child");
@@ -96,18 +98,18 @@ async function crawlRunes() {
 // 🧩 API 라우트
 // =======================
 
-// 수동 크롤링 갱신
+// 🔹 수동 크롤링 실행
 app.get("/admin/crawl-now", async (req, res) => {
   try {
     const count = await crawlRunes();
-    res.json({ ok: true, count });
+    res.json({ ok: true, count, message: `${count}개의 룬 데이터가 새로 저장되었습니다.` });
   } catch (error) {
     console.error("❌ 크롤링 실패:", error);
     res.json({ ok: false, error: error.message });
   }
 });
 
-// 룬 검색
+// 🔹 룬 검색
 app.get("/runes", (req, res) => {
   const name = req.query.name?.trim();
   if (!name) return res.json({ ok: false, error: "name parameter required" });
@@ -118,7 +120,7 @@ app.get("/runes", (req, res) => {
   res.json({ ok: true, rune: result });
 });
 
-// 서버 상태
+// 🔹 서버 상태
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
@@ -126,6 +128,8 @@ app.get("/health", (req, res) => {
     lastLoadedAt,
   });
 });
+
+// 🔹 Gemini AI 프록시 (추가)
 app.get("/ask", async (req, res) => {
   const question = req.query.question || "Hello Gemini!";
   const apiKey = process.env.GEMINI_API_KEY;
@@ -138,8 +142,8 @@ app.get("/ask", async (req, res) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: question }] }]
-        })
+          contents: [{ parts: [{ text: question }] }],
+        }),
       }
     );
 
@@ -152,13 +156,10 @@ app.get("/ask", async (req, res) => {
   }
 });
 
-// 서버 시작
+// =======================
+// 🚀 서버 시작
+// =======================
 app.listen(PORT, async () => {
   console.log(`✅ Server running on :${PORT}`);
-  try {
-    await crawlRunes();
-  } catch (err) {
-    console.error("⚠️ 초기 크롤 실패:", err.message);
-  }
-
+  console.log("💤 자동 크롤링 비활성화됨 — 수동 실행만 허용됩니다.");
 });
