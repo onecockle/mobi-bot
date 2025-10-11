@@ -34,28 +34,70 @@ async function createBrowser() {
 // 🔮 룬 크롤링 (수동 전용)
 // =======================
 async function crawlRunes() {
-  console.log("🔄 룬 크롤링 시작...");
-  const browser = await createBrowser();
-  const page = await browser.newPage();
+  console.log("🔄 Puppeteer 크롤링 시작...");
+  console.log("🧭 Chrome Path:", process.env.PUPPETEER_EXECUTABLE_PATH);
 
+  const browser = await puppeteer.launch({
+    headless: false, // 👈 반드시 false로 (탐지 방지)
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-extensions",
+      "--disable-gpu",
+      "--single-process",
+      "--window-size=1280,720",
+    ],
+  });
+
+  const page = await browser.newPage();
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+  );
+
+  // 💡 클라우드플레어 방어 회피용 헤더
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+    "Referer": "https://www.google.com/",
+  });
+
+  console.log("🌐 사이트 접속 중...");
   await page.goto("https://mabimobi.life/runes?t=search", {
-    waitUntil: "domcontentloaded",
+    waitUntil: "networkidle2",
     timeout: 180000,
   });
-  await new Promise((resolve) => setTimeout(resolve, 12000));
 
-  try {
-    await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 40000 });
-  } catch {
-    throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
+  // ⏳ Cloudflare 대기 (최소 15초)
+  console.log("⏳ Cloudflare 체크 대기 중...");
+  await new Promise((resolve) => setTimeout(resolve, 15000));
+
+  // 💬 HTML 검사
+  const html = await page.content();
+  if (html.includes("Just a moment")) {
+    console.error("⚠️ Cloudflare challenge still detected.");
+    throw new Error("⚠️ Cloudflare 우회 실패 — 브라우저 탐지됨");
   }
 
+  // 💡 테이블이 표시될 때까지 기다림
+  try {
+    await page.waitForSelector("tr[data-slot='table-row']", { timeout: 60000 });
+  } catch (e) {
+    const body = await page.content();
+    fs.writeFileSync("debug_page.html", body);
+    throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 구조 변경)");
+  }
+
+  console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
+
   const runeData = await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
+    const rows = Array.from(document.querySelectorAll("tr[data-slot='table-row']"));
     return rows.map((row) => {
-      const img = row.querySelector("img")?.src || "";
+      const imgTag = row.querySelector("img");
+      const img = imgTag ? imgTag.src : "";
       const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
-      const name = row.querySelectorAll("td")[2]?.innerText.trim() || "";
+      const name =
+        row.querySelector("td:nth-child(3) span")?.innerText.trim() || "";
       const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
       const effect = row.querySelectorAll("td")[4]?.innerText.trim() || "";
       return { name, category, grade, effect, img };
@@ -63,10 +105,10 @@ async function crawlRunes() {
   });
 
   await browser.close();
-  runeCache = runeData;
-  lastLoadedAt = new Date().toISOString();
+
   fs.writeFileSync("runes.json", JSON.stringify(runeData, null, 2));
-  console.log(`✅ ${runeData.length}개의 룬 저장 완료`);
+  console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
+
   return runeData.length;
 }
 
