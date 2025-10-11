@@ -1,5 +1,5 @@
 // =======================
-// index.js (Render Starter 최적화 완성 버전)
+// index.js (수동 뉴스 + 수동 룬 안정 버전)
 // =======================
 
 import express from "express";
@@ -9,47 +9,34 @@ import fs from "fs";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ---------------------------
-// 전역 상태 관리
-// ---------------------------
 let runeCache = [];
 let lastLoadedAt = null;
-let isCrawlingNews = false;
-let browserInstance = null;
 
 // =======================
-// 🧠 Puppeteer 브라우저 재사용
+// 🧠 Puppeteer 실행 함수
 // =======================
-async function getBrowser() {
-  if (!browserInstance) {
-    browserInstance = await puppeteer.launch({
-      headless: "new",
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-extensions",
-        "--disable-gpu",
-        "--single-process",
-      ],
-    });
-    console.log("✅ Puppeteer 브라우저 인스턴스 생성됨");
-  }
-  return browserInstance;
+async function createBrowser() {
+  return await puppeteer.launch({
+    headless: "new",
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-extensions",
+      "--disable-gpu",
+      "--single-process",
+    ],
+  });
 }
 
 // =======================
-// 🔄 룬 크롤링 (수동 전용)
+// 🔮 룬 크롤링 (수동 전용)
 // =======================
 async function crawlRunes() {
   console.log("🔄 룬 크롤링 시작...");
-  const browser = await getBrowser();
+  const browser = await createBrowser();
   const page = await browser.newPage();
-
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-  );
 
   await page.goto("https://mabimobi.life/runes?t=search", {
     waitUntil: "domcontentloaded",
@@ -75,16 +62,16 @@ async function crawlRunes() {
     });
   });
 
+  await browser.close();
   runeCache = runeData;
   lastLoadedAt = new Date().toISOString();
   fs.writeFileSync("runes.json", JSON.stringify(runeData, null, 2));
   console.log(`✅ ${runeData.length}개의 룬 저장 완료`);
-  await page.close();
   return runeData.length;
 }
 
 // =======================
-// 📢 뉴스 크롤링 (자동 주기)
+// 📰 뉴스 크롤링 (수동 전용)
 // =======================
 const NEWS_URLS = {
   notice: "https://mabinogimobile.nexon.com/News/Notice",
@@ -95,12 +82,15 @@ const NEWS_URLS = {
 };
 
 async function crawlNews(type = "notice", limit = 5) {
-  const browser = await getBrowser();
+  if (!Object.keys(NEWS_URLS).includes(type)) {
+    throw new Error(`Invalid type: ${type}`);
+  }
+
+  const browser = await createBrowser();
   const page = await browser.newPage();
+  const url = NEWS_URLS[type];
 
-  const url = NEWS_URLS[type] || NEWS_URLS.notice;
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
-
   const items = await page.evaluate((limit) => {
     const list = [];
     document.querySelectorAll("a").forEach((a) => {
@@ -110,79 +100,50 @@ async function crawlNews(type = "notice", limit = 5) {
           a.closest("tr")?.querySelector(".date")?.innerText ||
           a.closest("li")?.querySelector(".date")?.innerText ||
           "";
-        list.push({
-          title: title.replace(/\s+/g, " "),
-          link: a.href,
-          date: date.trim(),
-        });
+        list.push({ title, link: a.href, date: date.trim() });
       }
     });
     return list.slice(0, limit);
   }, limit);
 
-  await page.close();
+  await browser.close();
   console.log(`✅ [NEWS:${type}] ${items.length}개`);
   return items;
 }
 
-// 뉴스 캐시
-let newsCache = {};
+// =======================
+// 🧩 API 라우트
+// =======================
 
-// 🔹 /news 엔드포인트
-app.get("/news", async (req, res) => {
-  const type = (req.query.type || "notice").toLowerCase();
-  const limit = Math.min(parseInt(req.query.limit || "5", 10), 10);
+// 🔹 수동 룬 크롤링
+app.get("/admin/crawl-now", async (req, res) => {
   try {
-    const data = newsCache[type] || [];
-    res.json({ ok: true, type, count: data.length, news: data });
-  } catch (e) {
-    res.json({ ok: false, error: e.message });
+    const count = await crawlRunes();
+    res.json({ ok: true, count, message: `${count}개의 룬 저장 완료` });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
   }
 });
 
-// 🔁 자동 뉴스 갱신
-async function refreshNewsAll() {
-  if (isCrawlingNews) return;
-  isCrawlingNews = true;
-
-  console.log("🕐 자동 뉴스 갱신 시작");
-  for (const type of Object.keys(NEWS_URLS)) {
-    try {
-      newsCache[type] = await crawlNews(type, 5);
-    } catch (err) {
-      console.error(`❌ ${type} 뉴스 갱신 실패:`, err.message);
-    }
-  }
-  console.log("✅ 모든 뉴스 갱신 완료");
-  isCrawlingNews = false;
-}
-
-// 10분마다 자동 뉴스 갱신
-setInterval(refreshNewsAll, 600000); // 600000ms = 10분
-// 서버 시작 시 1회 실행
-setTimeout(refreshNewsAll, 5000);
-
-// 🔹 수동 뉴스 갱신 (관리자 전용)
+// 🔹 수동 뉴스 크롤링 (모든 탭)
 app.get("/admin/news-now", async (req, res) => {
-  if (isCrawlingNews) {
-    return res.json({ ok: false, message: "🕐 현재 자동 뉴스 갱신 중이에요. 잠시만 기다려주세요." });
-  }
-
+  const results = {};
   try {
-    await refreshNewsAll();
+    for (const type of Object.keys(NEWS_URLS)) {
+      results[type] = await crawlNews(type, 5);
+    }
     res.json({
       ok: true,
       message: "✅ 모든 뉴스 데이터를 수동으로 갱신했습니다.",
       updatedAt: new Date().toISOString(),
+      results,
     });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
 });
 
-// =======================
-// 🔹 룬 검색 엔드포인트
-// =======================
+// 🔹 룬 검색
 app.get("/runes", (req, res) => {
   const name = req.query.name?.trim();
   if (!name) return res.json({ ok: false, error: "name parameter required" });
@@ -196,22 +157,11 @@ app.get("/runes", (req, res) => {
   res.json({ ok: true, rune: matches[0], count: matches.length });
 });
 
-// 🔹 수동 룬 크롤링
-app.get("/admin/crawl-now", async (req, res) => {
-  try {
-    const count = await crawlRunes();
-    res.json({ ok: true, count, message: `${count}개의 룬이 저장되었습니다.` });
-  } catch (e) {
-    res.json({ ok: false, error: e.message });
-  }
-});
-
 // 🔹 서버 상태
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    runes: runeCache.length,
-    newsTypes: Object.keys(newsCache),
+    runeItems: runeCache.length,
     lastLoadedAt,
   });
 });
@@ -221,5 +171,5 @@ app.get("/health", (req, res) => {
 // =======================
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log("💤 룬은 수동 크롤링만, 뉴스는 자동 갱신으로 작동합니다.");
+  console.log("📢 뉴스 및 룬 모두 수동 크롤링 전용 모드로 실행 중");
 });
