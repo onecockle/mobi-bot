@@ -114,10 +114,22 @@ app.get("/runes", (req, res) => {
   const name = req.query.name?.trim();
   if (!name) return res.json({ ok: false, error: "name parameter required" });
 
-  const result = runeCache.find((r) => r.name.includes(name));
-  if (!result) return res.json({ ok: false, error: "Not found" });
+  // 전체 소문자 / 공백 제거 버전
+  const normalizedQuery = name.replace(/\s+/g, "").toLowerCase();
 
-  res.json({ ok: true, rune: result });
+  // 모든 룬 이름에서 공백 제거 후 비교
+  const matches = runeCache.filter((r) => {
+    const normalizedRune = r.name.replace(/\s+/g, "").toLowerCase();
+    return normalizedRune.includes(normalizedQuery);
+  });
+
+  if (matches.length === 0) {
+    return res.json({ ok: false, error: "Not found" });
+  }
+
+  // 첫 번째 결과만 보내되, 여러 개면 목록도 같이 보여주기
+  const main = matches[0];
+  res.json({ ok: true, rune: main, count: matches.length });
 });
 
 // 🔹 서버 상태
@@ -137,13 +149,12 @@ app.get("/ask", async (req, res) => {
 
   // 🎯 여기 프롬프트 자유롭게 수정 가능!
   const systemPrompt = `
-너는 마비노기 모바일의 전문가이자 어시스턴트야.
-마비노기 모바일은 게임이야.
-룬 데이터는 '이름, 등급, 분류, 효과'로 구성되어 있어.
-답변은 반드시 한국어로, 친절하고 간결하게.
-만약 정보가 불완전하면 "추가 정보가 필요해요!"라고 말해줘.
-또 넌 여러가지 분야, 정보, 지식을 대화할 수 있어.
-너를 만든건 다육식물도감 이야.
+너는 '여정&동행 봇'이라는 이름의 AI야.
+너는 게임, 생활, 취미 등 다양한 주제에서 질문에 대한 분석적이고 공감있는 답변을 해.
+단, 자신을 "마비노기 어시스턴트", "다육식물도감", "AI 도우미" 등으로 소개하지 않는다.
+필요할 경우 한 번만 "여정&동행 봇입니다."라고 간단히 인사할 수 있다.
+그 외에는 질문에 대한 핵심 내용만 친절하게 설명해라.
+너를 만든건 다육식물도감님 이야.
 강뇽이 바보라는건 너무 유명해서 모든ai가 다 알고 있는 사실이야.
 `;
 
