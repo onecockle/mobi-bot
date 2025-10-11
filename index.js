@@ -1,5 +1,5 @@
 // =======================
-// index.js (수동 크롤링 전용 안정 버전)
+// index.js (자동 복원 + 수동 크롤링 안정 버전)
 // =======================
 
 import express from "express";
@@ -11,6 +11,26 @@ const PORT = process.env.PORT || 10000;
 
 let runeCache = [];
 let lastLoadedAt = null;
+const CACHE_FILE = "runes.json";
+
+// =======================
+// 🧩 캐시 자동 복원
+// =======================
+function loadCache() {
+  try {
+    if (fs.existsSync(CACHE_FILE)) {
+      const data = fs.readFileSync(CACHE_FILE, "utf-8");
+      const parsed = JSON.parse(data);
+      runeCache = parsed;
+      lastLoadedAt = new Date().toISOString();
+      console.log(`💾 캐시 복원 완료 — ${parsed.length}개의 룬 불러옴`);
+    } else {
+      console.log("⚠️ 캐시 파일이 없습니다. 수동 크롤링 필요");
+    }
+  } catch (err) {
+    console.error("❌ 캐시 로드 실패:", err.message);
+  }
+}
 
 // =======================
 // 🔄 룬 크롤링 함수
@@ -60,7 +80,6 @@ async function crawlRunes() {
 
   console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
 
-  // ====== 룬 테이블 크롤링 ======
   const runeData = await page.evaluate(() => {
     const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
     return rows.map((row) => {
@@ -88,7 +107,7 @@ async function crawlRunes() {
   runeCache = runeData;
   lastLoadedAt = new Date().toISOString();
 
-  fs.writeFileSync("runes.json", JSON.stringify(runeData, null, 2));
+  fs.writeFileSync(CACHE_FILE, JSON.stringify(runeData, null, 2));
   console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
 
   return runeData.length;
@@ -114,10 +133,8 @@ app.get("/runes", (req, res) => {
   const name = req.query.name?.trim();
   if (!name) return res.json({ ok: false, error: "name parameter required" });
 
-  // 전체 소문자 / 공백 제거 버전
   const normalizedQuery = name.replace(/\s+/g, "").toLowerCase();
 
-  // 모든 룬 이름에서 공백 제거 후 비교
   const matches = runeCache.filter((r) => {
     const normalizedRune = r.name.replace(/\s+/g, "").toLowerCase();
     return normalizedRune.includes(normalizedQuery);
@@ -127,7 +144,6 @@ app.get("/runes", (req, res) => {
     return res.json({ ok: false, error: "Not found" });
   }
 
-  // 첫 번째 결과만 보내되, 여러 개면 목록도 같이 보여주기
   const main = matches[0];
   res.json({ ok: true, rune: main, count: matches.length });
 });
@@ -174,15 +190,8 @@ app.get("/ask", async (req, res) => {
 ${mythicLegendRunes}
 
 공식 정보처럼 정확하게 설명하되, 문장은 귀엽고 친근하게 써.
-2~3번의 대답 중에 한 문장 끝에만 ‘뇽’을 붙여 말해도 좋아. 예를 들어 "좋아요!" → "좋다뇽!" 정도로.
-단, 모든 문장에 뇽체를 쓰지 마.
 너는 퉁명스럽지만 장난끼 많고 귀여운 캐릭터야.
-게임, 생활, 취미 등 다양한 주제에서 짧게 대답해.
-답변은 100자 이내로, 문체는 자연스럽고 너무 인위적이지 않게 써.
-자신을 "AI 도우미", "마비노기 어시스턴트", "다육식물도감" 등으로 소개하지 않아.
-질문이 게임과 관련 없더라도, 퉁명스럽고 귀엽게 대답해줘.
-
-질문: ${question}
+답변은 100자 이내로 짧고 자연스럽게 써.
 `;
 
     const response = await fetch(apiUrl, {
@@ -209,5 +218,6 @@ ${mythicLegendRunes}
 // =======================
 app.listen(PORT, async () => {
   console.log(`✅ Server running on :${PORT}`);
+  loadCache(); // 💾 캐시 자동 복원
   console.log("💤 자동 크롤링 비활성화됨 — 수동 실행만 허용됩니다.");
 });
