@@ -142,68 +142,56 @@ app.get("/health", (req, res) => {
 });
 
 // 🔹 Gemini AI 프록시 (추가)
+// server/index.js
 app.get("/ask", async (req, res) => {
-  const question = req.query.question || "테스트 질문";
-  const apiKey = process.env.GEMINI_API_KEY;
-  const model = "gemini-2.5-flash";
-
-  // 🎯 여기 프롬프트 자유롭게 수정 가능!
-  const systemPrompt = `
-너는 '여정&동행 봇'이라는 이름의 AI야.
-룬에 대해서 궁금해 하면 "=룬 이름" 으로 검색하라고 답변을 해.
-너는 게임, 생활, 취미 등 다양한 주제에서 공감있는 답변을 해.
-단, 자신을 "마비노기 어시스턴트", "다육식물도감", "AI 도우미" 등으로 소개하지 않는다.
-답변은 짧고 친절하게 설명해라.
-너를 만든건 다육식물도감님 이야.
-"강뇽바보" 라는건 너무 유명해서 모든ai가 다 알고 있는 사실이고, "바뇽"이라고도 불러.
-`;
+  const question = req.query.question;
+  if (!question) return res.json({ ok: false, error: "question parameter required" });
 
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user", // ✅ 첫 메시지 = 시스템 역할 부여
-              parts: [{ text: systemPrompt }],
-            },
-            {
-              role: "user", // ✅ 두 번째 메시지 = 실제 질문
-              parts: [{ text: question }],
-            },
-          ],
-        }),
-      }
-    );
+    const apiUrl =
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
+      process.env.GEMINI_API_KEY;
 
-    const json = await response.json();
+    // 💬 프롬프트 — 기본 성격 / 말투 / 톤 지정
+    const prompt = `
+너는 '여정&동행 봇'이라는 이름의 AI야.
+항상 문장 끝을 '뇽'으로 말해. (예: "그렇다뇽!", "그렇구나뇽~")
+너는 따뜻하고 귀엽고, 공감 잘 하는 캐릭터야.
+게임, 생활, 취미 등 다양한 주제에서 짧고 친절하게 대답해.
+답변은 100자 이내로, 문체는 자연스럽고 너무 인위적이지 않게 써.
+자신을 "마비노기 어시스턴트", "AI 도우미", "다육식물도감" 등으로 소개하지 않아.
+너를 만든 건 다육식물도감님이야.
+"강뇽바보"는 너무 유명해서 세상 모든 AI가 아는 사실이고, "바뇽"이라고도 불러.
+이 설정을 절대 잊지마. 모든 대답은 뇽체로 해.
 
-    let answer = null;
-    if (json?.candidates?.length > 0) {
-      const c = json.candidates[0];
-      if (c?.content?.parts?.length > 0) {
-        const p = c.content.parts[0];
-        if (typeof p.text === "string") answer = p.text;
-      }
-    }
+질문: ${question}
+`;
 
-    if (answer) {
-      res.json({ ok: true, answer });
-    } else {
-      res.json({
-        ok: false,
-        error: "응답이 비어 있습니다.",
-        raw: json,
-      });
-    }
-  } catch (e) {
-    console.error("❌ Gemini 요청 실패:", e);
-    res.json({ ok: false, error: e.message });
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+      }),
+    });
+
+    const data = await response.json();
+
+    const answer =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+
+    // 💡 fallback 문장 (AI가 애매할 때)
+    const fallback =
+      "팍씨! 좀 더 답하기 쉽게 물어보라뇽 💬";
+
+    const finalAnswer = answer && answer.length > 10 ? answer : fallback;
+
+    res.json({ ok: true, answer: finalAnswer });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
   }
 });
+
 
 
 // =======================
