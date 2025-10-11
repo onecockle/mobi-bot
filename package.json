@@ -1,19 +1,29 @@
 {
   "name": "mobi-bot",
   "version": "1.0.0",
-  "type": "module",
+  "description": "Mabinogi Mobile Rune Crawler + Gemini AI Assistant Server",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "crawl": "node index.js --crawl"
   },
   "dependencies": {
-    "axios": "^1.6.0",
-    "cheerio": "^1.0.0-rc.12",
-    "express": "^4.18.2",
-    "puppeteer": "^22.6.5",
+    "express": "^4.19.2",
+    "puppeteer": "^22.15.0",
+    "fs": "0.0.1-security"
   },
   "engines": {
-    "node": ">=20"
-  }
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "mabinogi",
+    "mabinogimobile",
+    "rune",
+    "crawler",
+    "ai",
+    "bot",
+    "express",
+    "puppeteer"
+  ]
 }
