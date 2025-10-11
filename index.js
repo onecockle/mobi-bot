@@ -17,7 +17,7 @@ let lastLoadedAt = null;
 // =======================
 async function createBrowser() {
   return await puppeteer.launch({
-    headless: "false",
+    headless: "new",
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
     args: [
       "--no-sandbox",
