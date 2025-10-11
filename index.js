@@ -14,23 +14,13 @@ let lastLoadedAt = null;
 const CACHE_FILE = "runes.json";
 
 // =======================
-// 🧩 캐시 자동 복원
+// 🔧 전역 캐시 / 상태
 // =======================
-function loadCache() {
-  try {
-    if (fs.existsSync(CACHE_FILE)) {
-      const data = fs.readFileSync(CACHE_FILE, "utf-8");
-      const parsed = JSON.parse(data);
-      runeCache = parsed;
-      lastLoadedAt = new Date().toISOString();
-      console.log(`💾 캐시 복원 완료 — ${parsed.length}개의 룬 불러옴`);
-    } else {
-      console.log("⚠️ 캐시 파일이 없습니다. 수동 크롤링 필요");
-    }
-  } catch (err) {
-    console.error("❌ 캐시 로드 실패:", err.message);
-  }
-}
+let runeCache = [];
+let lastLoadedAt = null;
+let lastSentState = { abyss: null, senmai: null };
+let lastNotifiedAt = null;
+let isChecking = false;
 
 // =======================
 // 🔄 룬 크롤링 함수
@@ -112,6 +102,102 @@ async function crawlRunes() {
 
   return runeData.length;
 }
+// =======================
+// 🔍 어비스/센마이 자동 감시
+// =======================
+async function crawlAbyssStatus() {
+  console.log("🔍 mabimobi.life 라사 서버 감시 시작...");
+
+  const browser = await puppeteer.launch({
+    headless: "new",
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-extensions",
+      "--disable-gpu",
+      "--single-process",
+    ],
+  });
+
+  const page = await browser.newPage();
+  await page.goto("https://mabimobi.life/", { waitUntil: "networkidle2", timeout: 60000 });
+  await page.waitForSelector("h3", { timeout: 20000 });
+
+  const info = await page.evaluate(() => {
+    const section = Array.from(document.querySelectorAll("h3")).find(h =>
+      h.innerText.includes("심층")
+    );
+    if (!section) return [];
+
+    const root = section.closest("div");
+    const slots = root.querySelectorAll("div.grid > div");
+    const results = [];
+
+    slots.forEach(div => {
+      const name = div.querySelector("span.text-xs")?.innerText?.trim() || "";
+      const time = div.querySelector("span.font-noto-sans")?.innerText?.trim() || "";
+      const status = div.querySelector("span.text-white.font-bold")?.innerText?.trim() || "";
+      results.push({ name, time, status });
+    });
+
+    return results.filter(x => ["어비스", "센마이 평원"].includes(x.name));
+  });
+
+  await browser.close();
+  console.log("✅ 어비스 정보:", info);
+  return info;
+}
+
+// =======================
+// 💬 카카오봇 알림 전송
+// =======================
+async function sendKakaoMessage(text) {
+  try {
+    const webhookUrl = process.env.KAKAO_WEBHOOK_URL;
+    if (!webhookUrl) return console.warn("⚠️ KAKAO_WEBHOOK_URL 없음");
+
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text }),
+    });
+    console.log("📤 카카오봇 알림:", text);
+  } catch (err) {
+    console.error("⚠️ 메시지 전송 실패:", err.message);
+  }
+}
+
+// =======================
+// 🔁 자동 감시 루프
+// =======================
+async function checkAbyssAuto() {
+  if (isChecking) return;
+  isChecking = true;
+
+  try {
+    const info = await crawlAbyssStatus();
+    if (!info || info.length === 0) return;
+
+    for (const item of info) {
+      const key = item.name === "어비스" ? "abyss" : "senmai";
+      const prev = lastSentState[key];
+      const current = `${item.status || "미확인"} ${item.time || ""}`.trim();
+
+      if (prev !== current && item.status) {
+        await sendKakaoMessage(`🔔 ${item.name} 새 상태 감지!\n📅 ${current}`);
+        lastSentState[key] = current;
+        lastNotifiedAt = new Date().toISOString();
+      }
+    }
+  } catch (err) {
+    console.error("❌ 감시 실패:", err.message);
+  } finally {
+    isChecking = false;
+  }
+}
+
 
 // =======================
 // 🧩 API 라우트
@@ -211,6 +297,24 @@ ${mythicLegendRunes}
     res.json({ ok: false, error: err.message });
   }
 });
+
+// =======================
+// 🌐 어비스 수동 확인 / UptimeRobot 핑
+// =======================
+app.get("/abyss", async (req, res) => {
+  try {
+    const info = await crawlAbyssStatus();
+    res.json({ ok: true, info, lastSentState, lastNotifiedAt });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/abyss/ping", (req, res) => {
+  checkAbyssAuto();
+  res.send("✅ Abyss auto-check triggered");
+});
+
 
 // =======================
 // 🚀 서버 시작
