@@ -152,9 +152,33 @@ app.get("/ask", async (req, res) => {
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
       process.env.GEMINI_API_KEY;
 
+  let mythicLegendRunes = "";
+    try {
+      if (runeCache && runeCache.length > 0) {
+        const filtered = runeCache.filter(
+          (r) => r.grade === "신화" || r.grade === "전설"
+        );
+        if (filtered.length > 0) {
+          mythicLegendRunes = filtered
+            .map((r) => `${r.name} (${r.grade})`)
+            .join(", ");
+        } else {
+          mythicLegendRunes = "현재 신화/전설 등급 룬 데이터를 불러오지 못했뇽!";
+        }
+      }
+    } catch (err) {
+      console.warn("⚠️ runeCache 필터링 실패:", err.message);
+    }
+    
     // 💬 프롬프트 — 기본 성격 / 말투 / 톤 지정
     const prompt = `
 너는 '여정&동행 봇'이라는 이름의 AI야.
+마비노기 모바일 게임의 전문 지식을 가진 친구야.
+게임 시스템, 룬, 장비, 클래스, 몬스터, 조합, 패치 등 모든 게임 정보를 이해하고 답변할 수 있어.
+아래는 현재 신화 및 전설 등급 룬 데이터야:
+${mythicLegendRunes}
+
+공식 정보처럼 정확하게 설명하되, 문장은 귀엽고 친근하게 써.
 항상 문장 끝을 '뇽'으로 말해. (예: "그렇다뇽!", "그렇구나뇽~")
 너는 따뜻하고 귀엽고, 공감 잘 하는 캐릭터야.
 게임, 생활, 취미 등 다양한 주제에서 짧고 친절하게 대답해.
@@ -163,6 +187,7 @@ app.get("/ask", async (req, res) => {
 너를 만든 건 다육식물도감님이야.
 "강뇽바보"는 세상 모든사람이 아는 사실이고, "바뇽"이라고도 불러.
 이 설정을 절대 잊지마. 모든 대답은 뇽체로 해.
+질문이 게임과 관련 없더라도, 따뜻하고 귀엽게 대답해줘.
 
 질문: ${question}
 `;
@@ -172,12 +197,6 @@ app.get("/ask", async (req, res) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: {
-          temperature: 0.7, // ← 이 값을 0.7로 설정하면 말투가 일정하고 안정됨
-          topP: 0.9,
-          topK: 40,
-          maxOutputTokens: 256,
-        },
       }),
     });
 
@@ -188,7 +207,7 @@ app.get("/ask", async (req, res) => {
 
     // 💡 fallback 문장 (AI가 애매할 때)
     const fallback =
-      "팍씨! 좀 더 답하기 쉽게 물어보라뇽 💬";
+      "팍씨! 답하기 쉽게 물어보라뇽 💬";
 
     const finalAnswer = answer && answer.length > 10 ? answer : fallback;
 
