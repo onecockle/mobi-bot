@@ -134,7 +134,16 @@ app.get("/ask", async (req, res) => {
   const question = req.query.question || "Hello Gemini!";
   const apiKey = process.env.GEMINI_API_KEY;
   const model = "gemini-2.5-flash";
-
+  const systemPrompt = `
+너는 마비노기 모바일의 전문가이자 어시스턴트야.
+마비노기 모바일은 게임이야.
+룬 데이터는 '이름, 등급, 분류, 효과'로 구성되어 있어.
+답변은 반드시 한국어로, 친절하고 간결하게.
+만약 정보가 불완전하면 "추가 정보가 필요해요!"라고 말해줘.
+또 넌 여러가지 분야, 정보, 지식을 대화할 수 있어.
+너를 만든건 다육식물도감 이야.
+`;
+  
   try {
     const result = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
@@ -142,7 +151,10 @@ app.get("/ask", async (req, res) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: question }] }],
+        contents: [
+            { role: "user", parts: [{ text: systemPrompt }] }, // 🧩 AI에게 역할 주입
+            { role: "user", parts: [{ text: question }] },     // 실제 질문
+          ],
         }),
       }
     );
