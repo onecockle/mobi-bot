@@ -321,6 +321,8 @@ app.get("/abyss/ping", (req, res) => {
 // =======================
 app.listen(PORT, async () => {
   console.log(`✅ Server running on :${PORT}`);
-  loadCache(); // 💾 캐시 자동 복원
+  console.log("💤 Starter 플랜 — UptimeRobot 기반 감시 활성화");
+  checkAbyssAuto();
+  setInterval(checkAbyssAuto, 1000 * 60 * 5);
   console.log("💤 자동 크롤링 비활성화됨 — 수동 실행만 허용됩니다.");
 });
