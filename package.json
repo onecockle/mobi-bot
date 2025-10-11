@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node index.js",
     "crawl": "node index.js --crawl"
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "express": "^4.19.2",
