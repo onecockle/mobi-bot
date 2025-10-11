@@ -17,7 +17,7 @@ let lastLoadedAt = null;
 // =======================
 async function createBrowser() {
   return await puppeteer.launch({
-    headless: "new",
+    headless: "false",
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
     args: [
       "--no-sandbox",
@@ -42,7 +42,7 @@ async function crawlRunes() {
     waitUntil: "domcontentloaded",
     timeout: 180000,
   });
-  await new Promise((resolve) => setTimeout(resolve, 7000));
+  await new Promise((resolve) => setTimeout(resolve, 12000));
 
   try {
     await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 40000 });
