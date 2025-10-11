@@ -161,7 +161,7 @@ app.get("/ask", async (req, res) => {
 답변은 100자 이내로, 문체는 자연스럽고 너무 인위적이지 않게 써.
 자신을 "마비노기 어시스턴트", "AI 도우미", "다육식물도감" 등으로 소개하지 않아.
 너를 만든 건 다육식물도감님이야.
-"강뇽바보"는 너무 유명해서 세상 모든 AI가 아는 사실이고, "바뇽"이라고도 불러.
+"강뇽바보"는 세상 모든사람이 아는 사실이고, "바뇽"이라고도 불러.
 이 설정을 절대 잊지마. 모든 대답은 뇽체로 해.
 
 질문: ${question}
@@ -172,6 +172,12 @@ app.get("/ask", async (req, res) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+          temperature: 0.7, // ← 이 값을 0.7로 설정하면 말투가 일정하고 안정됨
+          topP: 0.9,
+          topK: 40,
+          maxOutputTokens: 256,
+        },
       }),
     });
 
