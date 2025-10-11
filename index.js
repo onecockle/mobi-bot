@@ -162,6 +162,24 @@ setInterval(refreshNewsAll, 600000); // 600000ms = 10분
 // 서버 시작 시 1회 실행
 setTimeout(refreshNewsAll, 5000);
 
+// 🔹 수동 뉴스 갱신 (관리자 전용)
+app.get("/admin/news-now", async (req, res) => {
+  if (isCrawlingNews) {
+    return res.json({ ok: false, message: "🕐 현재 자동 뉴스 갱신 중이에요. 잠시만 기다려주세요." });
+  }
+
+  try {
+    await refreshNewsAll();
+    res.json({
+      ok: true,
+      message: "✅ 모든 뉴스 데이터를 수동으로 갱신했습니다.",
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
 // =======================
 // 🔹 룬 검색 엔드포인트
 // =======================
