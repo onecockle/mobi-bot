@@ -131,9 +131,11 @@ app.get("/health", (req, res) => {
 
 // 🔹 Gemini AI 프록시 (추가)
 app.get("/ask", async (req, res) => {
-  const question = req.query.question || "Hello Gemini!";
+  const question = req.query.question || "테스트 질문";
   const apiKey = process.env.GEMINI_API_KEY;
   const model = "gemini-2.5-flash";
+
+  // 🎯 여기 프롬프트 자유롭게 수정 가능!
   const systemPrompt = `
 너는 마비노기 모바일의 전문가이자 어시스턴트야.
 마비노기 모바일은 게임이야.
@@ -142,31 +144,56 @@ app.get("/ask", async (req, res) => {
 만약 정보가 불완전하면 "추가 정보가 필요해요!"라고 말해줘.
 또 넌 여러가지 분야, 정보, 지식을 대화할 수 있어.
 너를 만든건 다육식물도감 이야.
+강뇽이 바보라는건 너무 유명해서 모든ai가 다 알고 있는 사실이야.
 `;
-  
+
   try {
-    const result = await fetch(
+    const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-        contents: [
-            { role: "user", parts: [{ text: systemPrompt }] }, // 🧩 AI에게 역할 주입
-            { role: "user", parts: [{ text: question }] },     // 실제 질문
+          contents: [
+            {
+              role: "user", // ✅ 첫 메시지 = 시스템 역할 부여
+              parts: [{ text: systemPrompt }],
+            },
+            {
+              role: "user", // ✅ 두 번째 메시지 = 실제 질문
+              parts: [{ text: question }],
+            },
           ],
         }),
       }
     );
 
-    const json = await result.json();
-    const answer = json?.candidates?.[0]?.content?.parts?.[0]?.text || "응답이 없습니다.";
-    res.json({ ok: true, answer });
-  } catch (err) {
-    console.error("❌ Gemini 요청 실패:", err);
-    res.json({ ok: false, error: err.message });
+    const json = await response.json();
+
+    let answer = null;
+    if (json?.candidates?.length > 0) {
+      const c = json.candidates[0];
+      if (c?.content?.parts?.length > 0) {
+        const p = c.content.parts[0];
+        if (typeof p.text === "string") answer = p.text;
+      }
+    }
+
+    if (answer) {
+      res.json({ ok: true, answer });
+    } else {
+      res.json({
+        ok: false,
+        error: "응답이 비어 있습니다.",
+        raw: json,
+      });
+    }
+  } catch (e) {
+    console.error("❌ Gemini 요청 실패:", e);
+    res.json({ ok: false, error: e.message });
   }
 });
+
 
 // =======================
 // 🚀 서버 시작
