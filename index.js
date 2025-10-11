@@ -1,5 +1,5 @@
 // =======================
-// index.js (수동 크롤링 전용 안정 버전)
+// index.js (Render Starter 최적화 완성 버전)
 // =======================
 
 import express from "express";
@@ -9,314 +9,199 @@ import fs from "fs";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// ---------------------------
+// 전역 상태 관리
+// ---------------------------
 let runeCache = [];
 let lastLoadedAt = null;
+let isCrawlingNews = false;
+let browserInstance = null;
 
 // =======================
-// 🔄 룬 크롤링 함수
+// 🧠 Puppeteer 브라우저 재사용
+// =======================
+async function getBrowser() {
+  if (!browserInstance) {
+    browserInstance = await puppeteer.launch({
+      headless: "new",
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-extensions",
+        "--disable-gpu",
+        "--single-process",
+      ],
+    });
+    console.log("✅ Puppeteer 브라우저 인스턴스 생성됨");
+  }
+  return browserInstance;
+}
+
+// =======================
+// 🔄 룬 크롤링 (수동 전용)
 // =======================
 async function crawlRunes() {
-  console.log("🔄 Puppeteer 크롤링 시작...");
-  console.log("🧭 Chrome Path:", process.env.PUPPETEER_EXECUTABLE_PATH);
-
-  const browser = await puppeteer.launch({
-    headless: "new",
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-extensions",
-      "--disable-gpu",
-      "--single-process",
-    ],
-  });
-
+  console.log("🔄 룬 크롤링 시작...");
+  const browser = await getBrowser();
   const page = await browser.newPage();
+
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
   );
 
-  console.log("🌐 사이트 접속 중...");
   await page.goto("https://mabimobi.life/runes?t=search", {
     waitUntil: "domcontentloaded",
     timeout: 180000,
   });
-
-  // Cloudflare 회피 대기
   await new Promise((resolve) => setTimeout(resolve, 7000));
 
-  // 룬 테이블 로드 대기
   try {
     await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 40000 });
-  } catch (e) {
+  } catch {
     throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
   }
 
-  const html = await page.content();
-  if (html.includes("Just a moment")) {
-    throw new Error("⚠️ Cloudflare challenge detected. Try again later.");
-  }
-
-  console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
-
-  // ====== 룬 테이블 크롤링 ======
   const runeData = await page.evaluate(() => {
     const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
     return rows.map((row) => {
-      const imgTag = row.querySelector("img");
-      const img = imgTag
-        ? imgTag.src.replace(/^\/_next\/image\?url=/, "https://mabimobi.life/_next/image?url=")
-        : "";
-
+      const img = row.querySelector("img")?.src || "";
       const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
-
-      const nameEl =
-        row.querySelector("td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']") ||
-        row.querySelector("td:nth-child(3) span:last-child");
-      const name = nameEl ? nameEl.innerText.trim() : "";
-
+      const name = row.querySelectorAll("td")[2]?.innerText.trim() || "";
       const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
       const effect = row.querySelectorAll("td")[4]?.innerText.trim() || "";
-
       return { name, category, grade, effect, img };
     });
   });
 
-  await browser.close();
-
   runeCache = runeData;
   lastLoadedAt = new Date().toISOString();
-
   fs.writeFileSync("runes.json", JSON.stringify(runeData, null, 2));
-  console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
-
+  console.log(`✅ ${runeData.length}개의 룬 저장 완료`);
+  await page.close();
   return runeData.length;
 }
 
 // =======================
-// 🧩 API 라우트
+// 📢 뉴스 크롤링 (자동 주기)
 // =======================
+const NEWS_URLS = {
+  notice: "https://mabinogimobile.nexon.com/News/Notice",
+  event: "https://mabinogimobile.nexon.com/News/Events?headlineId=2501",
+  update: "https://mabinogimobile.nexon.com/News/Update",
+  devnote: "https://mabinogimobile.nexon.com/News/Devnote",
+  improvement: "https://mabinogimobile.nexon.com/News/Improvement",
+};
 
-// 🔹 수동 크롤링 실행
-app.get("/admin/crawl-now", async (req, res) => {
+async function crawlNews(type = "notice", limit = 5) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+
+  const url = NEWS_URLS[type] || NEWS_URLS.notice;
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
+
+  const items = await page.evaluate((limit) => {
+    const list = [];
+    document.querySelectorAll("a").forEach((a) => {
+      const title = (a.innerText || "").trim();
+      if (a.href.includes("mabinogimobile.nexon.com/News") && title.length > 3) {
+        const date =
+          a.closest("tr")?.querySelector(".date")?.innerText ||
+          a.closest("li")?.querySelector(".date")?.innerText ||
+          "";
+        list.push({
+          title: title.replace(/\s+/g, " "),
+          link: a.href,
+          date: date.trim(),
+        });
+      }
+    });
+    return list.slice(0, limit);
+  }, limit);
+
+  await page.close();
+  console.log(`✅ [NEWS:${type}] ${items.length}개`);
+  return items;
+}
+
+// 뉴스 캐시
+let newsCache = {};
+
+// 🔹 /news 엔드포인트
+app.get("/news", async (req, res) => {
+  const type = (req.query.type || "notice").toLowerCase();
+  const limit = Math.min(parseInt(req.query.limit || "5", 10), 10);
   try {
-    const count = await crawlRunes();
-    res.json({ ok: true, count, message: `${count}개의 룬 데이터가 새로 저장되었습니다.` });
-  } catch (error) {
-    console.error("❌ 크롤링 실패:", error);
-    res.json({ ok: false, error: error.message });
+    const data = newsCache[type] || [];
+    res.json({ ok: true, type, count: data.length, news: data });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
   }
 });
 
-// 🔹 룬 검색
+// 🔁 자동 뉴스 갱신
+async function refreshNewsAll() {
+  if (isCrawlingNews) return;
+  isCrawlingNews = true;
+
+  console.log("🕐 자동 뉴스 갱신 시작");
+  for (const type of Object.keys(NEWS_URLS)) {
+    try {
+      newsCache[type] = await crawlNews(type, 5);
+    } catch (err) {
+      console.error(`❌ ${type} 뉴스 갱신 실패:`, err.message);
+    }
+  }
+  console.log("✅ 모든 뉴스 갱신 완료");
+  isCrawlingNews = false;
+}
+
+// 10분마다 자동 뉴스 갱신
+setInterval(refreshNewsAll, 600000); // 600000ms = 10분
+// 서버 시작 시 1회 실행
+setTimeout(refreshNewsAll, 5000);
+
+// =======================
+// 🔹 룬 검색 엔드포인트
+// =======================
 app.get("/runes", (req, res) => {
   const name = req.query.name?.trim();
   if (!name) return res.json({ ok: false, error: "name parameter required" });
 
-  // 전체 소문자 / 공백 제거 버전
   const normalizedQuery = name.replace(/\s+/g, "").toLowerCase();
+  const matches = runeCache.filter((r) =>
+    r.name.replace(/\s+/g, "").toLowerCase().includes(normalizedQuery)
+  );
 
-  // 모든 룬 이름에서 공백 제거 후 비교
-  const matches = runeCache.filter((r) => {
-    const normalizedRune = r.name.replace(/\s+/g, "").toLowerCase();
-    return normalizedRune.includes(normalizedQuery);
-  });
+  if (!matches.length) return res.json({ ok: false, error: "Not found" });
+  res.json({ ok: true, rune: matches[0], count: matches.length });
+});
 
-  if (matches.length === 0) {
-    return res.json({ ok: false, error: "Not found" });
+// 🔹 수동 룬 크롤링
+app.get("/admin/crawl-now", async (req, res) => {
+  try {
+    const count = await crawlRunes();
+    res.json({ ok: true, count, message: `${count}개의 룬이 저장되었습니다.` });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
   }
-
-  // 첫 번째 결과만 보내되, 여러 개면 목록도 같이 보여주기
-  const main = matches[0];
-  res.json({ ok: true, rune: main, count: matches.length });
 });
 
 // 🔹 서버 상태
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    items: runeCache.length,
+    runes: runeCache.length,
+    newsTypes: Object.keys(newsCache),
     lastLoadedAt,
   });
 });
 
-// 🔹 Gemini AI 프록시 (추가)
-// server/index.js
-app.get("/ask", async (req, res) => {
-  const question = req.query.question;
-  if (!question) return res.json({ ok: false, error: "question parameter required" });
-
-  try {
-    const apiUrl =
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
-      process.env.GEMINI_API_KEY;
-
-  let mythicLegendRunes = "";
-    try {
-      if (runeCache && runeCache.length > 0) {
-        const filtered = runeCache.filter(
-          (r) => r.grade === "신화" || r.grade === "전설"
-        );
-        if (filtered.length > 0) {
-          mythicLegendRunes = filtered
-            .map((r) => `${r.name} (${r.grade})`)
-            .join(", ");
-        } else {
-          mythicLegendRunes = "현재 신화/전설 등급 룬 데이터를 불러오지 못했뇽!";
-        }
-      }
-    } catch (err) {
-      console.warn("⚠️ runeCache 필터링 실패:", err.message);
-    }
-    
-    // 💬 프롬프트 — 기본 성격 / 말투 / 톤 지정
-    const prompt = `
-너는 '여정&동행 봇'이라는 이름의 AI야.
-마비노기 모바일 게임의 전문 지식을 가진 친구야.
-게임 시스템, 룬, 장비, 클래스, 몬스터, 조합, 패치 등 모든 게임 정보를 이해하고 답변할 수 있어.
-룬에 대해 물어보면 룬이름, 분류, 등급, 효과를 정확히 설명해줘.  
-아래는 현재 신화 및 전설 등급 룬 데이터야:
-${mythicLegendRunes}
-
-공식 정보처럼 정확하게 설명하되, 문장은 귀엽고 친근하게 써.
-가끔 문장 끝에만 ‘뇽’을 붙여 말해도 좋아. 예를 들어 "좋아요!" → "좋다뇽!" 정도로.  
-단, 모든 문장에 뇽체를 쓰지 말고, 상황에 맞게 자연스럽게 섞어서 사용해.
-너는 퉁명스럽지만 장난끼많고 귀여운 캐릭터야.
-게임, 생활, 취미 등 다양한 주제에서 짧게 대답해.
-답변은 100자 이내로, 문체는 자연스럽고 너무 인위적이지 않게 써.
-자신을 "마비노기 어시스턴트", "AI 도우미", "다육식물도감" 등으로 소개하지 않아.
-질문이 게임과 관련 없더라도, 퉁명스럽고 귀엽게 대답해줘.
-
-질문: ${question}
-`;
-
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-      }),
-    });
-
-    const data = await response.json();
-
-    const answer =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-
-    // 💡 fallback 문장 (AI가 애매할 때)
-    const fallback =
-      "팍씨! 답하기 쉽게 물어보라뇽 💬";
-
-    const finalAnswer = answer && answer.length > 10 ? answer : fallback;
-
-    res.json({ ok: true, answer: finalAnswer });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
-});
-// =======================
-// 🔹 마비노기모바일 공식 소식 크롤러
-// =======================
-const NEWS_URLS = {
-  notice:      "https://mabinogimobile.nexon.com/News/Notice",
-  event:       "https://mabinogimobile.nexon.com/News/Events?headlineId=2501",
-  update:      "https://mabinogimobile.nexon.com/News/Update",
-  devnote:     "https://mabinogimobile.nexon.com/News/Devnote",
-  improvement: "https://mabinogimobile.nexon.com/News/Improvement",
-};
-
-async function crawlNews(type = "notice", limit = 5) {
-  if (!Object.keys(NEWS_URLS).includes(type)) {
-    throw new Error(`Invalid type. use one of: ${Object.keys(NEWS_URLS).join(", ")}`);
-  }
-  const url = NEWS_URLS[type];
-  console.log(`📡 [NEWS] ${type.toUpperCase()} → ${url}`);
-
-  const browser = await puppeteer.launch({
-    headless: "new",
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
-
-  const page = await browser.newPage();
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-  );
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
-
-  const selectorsToTry = [
-    ".list_notice tbody tr",
-    "table tbody tr",
-    "ul li",
-    "ol li",
-    ".board_list li",
-    ".news_list li",
-  ];
-  let rowsFound = false;
-  for (const sel of selectorsToTry) {
-    try {
-      await page.waitForSelector(sel, { timeout: 6000 });
-      rowsFound = true;
-      break;
-    } catch (_) {}
-  }
-  if (!rowsFound) {
-    await browser.close();
-    throw new Error("목록을 찾지 못했어요 (페이지 구조 변경 가능)");
-  }
-
-  const items = await page.evaluate((limit) => {
-    const anchors = Array.from(document.querySelectorAll("a"))
-      .filter(a => a.href && a.href.includes("mabinogimobile.nexon.com/News"))
-      .map(a => ({
-        title: (a.innerText || "").trim().replace(/\s+/g, " "),
-        link: a.href,
-        date:
-          (a.closest("tr")?.querySelector(".date")?.innerText ||
-           a.parentElement?.querySelector(".date")?.innerText ||
-           a.closest("li")?.querySelector(".date")?.innerText ||
-           a.closest("tr")?.querySelector("td:last-child")?.innerText ||
-           "").trim().replace(/\s+/g, " "),
-      }))
-      .filter(x => x.title && x.link);
-
-    const seen = new Set();
-    const uniq = [];
-    for (const it of anchors) {
-      const key = it.title + "@" + it.link;
-      if (!seen.has(key)) {
-        seen.add(key);
-        uniq.push(it);
-      }
-      if (uniq.length >= limit) break;
-    }
-    return uniq;
-  }, limit);
-
-  await browser.close();
-  console.log(`✅ [NEWS] ${type} ${items.length}개`);
-  return items;
-}
-
-// 🔸 /news 엔드포인트
-app.get("/news", async (req, res) => {
-  const type = (req.query.type || "notice").toLowerCase();
-  const limit = Math.min(parseInt(req.query.limit || "5", 10) || 5, 10);
-  try {
-    const news = await crawlNews(type, limit);
-    res.json({ ok: true, type, count: news.length, news });
-  } catch (err) {
-    console.error("❌ 뉴스 크롤 실패:", err.message);
-    res.json({ ok: false, error: err.message });
-  }
-});
-
-
 // =======================
 // 🚀 서버 시작
 // =======================
-app.listen(PORT, async () => {
-  console.log(`✅ Server running on :${PORT}`);
-  console.log("💤 자동 크롤링 비활성화됨 — 수동 실행만 허용됩니다.");
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log("💤 룬은 수동 크롤링만, 뉴스는 자동 갱신으로 작동합니다.");
 });
