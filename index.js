@@ -9,10 +9,6 @@ import fs from "fs";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-let runeCache = [];
-let lastLoadedAt = null;
-const CACHE_FILE = "runes.json";
-
 // =======================
 // 🔧 전역 캐시 / 상태
 // =======================
