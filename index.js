@@ -14,7 +14,6 @@ const PORT = process.env.PORT || 10000;
 // =======================
 let runeCache = [];
 let lastLoadedAt = null;
-let lastSentState = { abyss: null, senmai: null };
 let lastNotifiedAt = null;
 let isChecking = false;
 
@@ -97,101 +96,6 @@ async function crawlRunes() {
   console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
 
   return runeData.length;
-}
-// =======================
-// 🔍 어비스/센마이 자동 감시
-// =======================
-async function crawlAbyssStatus() {
-  console.log("🔍 mabimobi.life 라사 서버 감시 시작...");
-
-  const browser = await puppeteer.launch({
-    headless: "new",
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-extensions",
-      "--disable-gpu",
-      "--single-process",
-    ],
-  });
-
-  const page = await browser.newPage();
-  await page.goto("https://mabimobi.life/", { waitUntil: "networkidle2", timeout: 60000 });
-  await page.waitForSelector("h3", { timeout: 20000 });
-
-  const info = await page.evaluate(() => {
-    const section = Array.from(document.querySelectorAll("h3")).find(h =>
-      h.innerText.includes("심층")
-    );
-    if (!section) return [];
-
-    const root = section.closest("div");
-    const slots = root.querySelectorAll("div.grid > div");
-    const results = [];
-
-    slots.forEach(div => {
-      const name = div.querySelector("span.text-xs")?.innerText?.trim() || "";
-      const time = div.querySelector("span.font-noto-sans")?.innerText?.trim() || "";
-      const status = div.querySelector("span.text-white.font-bold")?.innerText?.trim() || "";
-      results.push({ name, time, status });
-    });
-
-    return results.filter(x => ["어비스", "센마이 평원"].includes(x.name));
-  });
-
-  await browser.close();
-  console.log("✅ 어비스 정보:", info);
-  return info;
-}
-
-// =======================
-// 💬 카카오봇 알림 전송
-// =======================
-async function sendKakaoMessage(text) {
-  try {
-    const webhookUrl = process.env.KAKAO_WEBHOOK_URL;
-    if (!webhookUrl) return console.warn("⚠️ KAKAO_WEBHOOK_URL 없음");
-
-    await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text }),
-    });
-    console.log("📤 카카오봇 알림:", text);
-  } catch (err) {
-    console.error("⚠️ 메시지 전송 실패:", err.message);
-  }
-}
-
-// =======================
-// 🔁 자동 감시 루프
-// =======================
-async function checkAbyssAuto() {
-  if (isChecking) return;
-  isChecking = true;
-
-  try {
-    const info = await crawlAbyssStatus();
-    if (!info || info.length === 0) return;
-
-    for (const item of info) {
-      const key = item.name === "어비스" ? "abyss" : "senmai";
-      const prev = lastSentState[key];
-      const current = `${item.status || "미확인"} ${item.time || ""}`.trim();
-
-      if (prev !== current && item.status) {
-        await sendKakaoMessage(`🔔 ${item.name} 새 상태 감지!\n📅 ${current}`);
-        lastSentState[key] = current;
-        lastNotifiedAt = new Date().toISOString();
-      }
-    }
-  } catch (err) {
-    console.error("❌ 감시 실패:", err.message);
-  } finally {
-    isChecking = false;
-  }
 }
 
 
@@ -292,37 +196,6 @@ ${mythicLegendRunes}
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
-});
-
-
-// =======================
-// 🔔 카카오봇 Webhook 수신부
-// =======================
-app.post("/webhook", express.json(), (req, res) => {
-  const { message } = req.body;
-  console.log("📥 Render Webhook 수신:", message);
-
-  // 실제 카카오봇 연동 (이 부분은 카카오봇 쪽에서 fetch로 처리 가능)
-  // 현재는 단순히 로그로 출력
-  res.json({ ok: true, received: message });
-});
-
-
-// =======================
-// 🌐 어비스 수동 확인 / UptimeRobot 핑
-// =======================
-app.get("/abyss", async (req, res) => {
-  try {
-    const info = await crawlAbyssStatus();
-    res.json({ ok: true, info, lastSentState, lastNotifiedAt });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
-});
-
-app.get("/abyss/ping", (req, res) => {
-  checkAbyssAuto();
-  res.send("✅ Abyss auto-check triggered");
 });
 
 
