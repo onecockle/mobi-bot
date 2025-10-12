@@ -1,5 +1,5 @@
 // =======================
-// index.js (자동 복원 + 수동 크롤링 안정 버전)
+// index.js (수동 크롤링 전용 안정 버전)
 // =======================
 
 import express from "express";
@@ -9,13 +9,8 @@ import fs from "fs";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// =======================
-// 🔧 전역 캐시 / 상태
-// =======================
 let runeCache = [];
 let lastLoadedAt = null;
-let lastNotifiedAt = null;
-let isChecking = false;
 
 // =======================
 // 🔄 룬 크롤링 함수
@@ -65,6 +60,7 @@ async function crawlRunes() {
 
   console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
 
+  // ====== 룬 테이블 크롤링 ======
   const runeData = await page.evaluate(() => {
     const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
     return rows.map((row) => {
@@ -92,12 +88,11 @@ async function crawlRunes() {
   runeCache = runeData;
   lastLoadedAt = new Date().toISOString();
 
-  fs.writeFileSync(CACHE_FILE, JSON.stringify(runeData, null, 2));
+  fs.writeFileSync("runes.json", JSON.stringify(runeData, null, 2));
   console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
 
   return runeData.length;
 }
-
 
 // =======================
 // 🧩 API 라우트
@@ -119,8 +114,10 @@ app.get("/runes", (req, res) => {
   const name = req.query.name?.trim();
   if (!name) return res.json({ ok: false, error: "name parameter required" });
 
+  // 전체 소문자 / 공백 제거 버전
   const normalizedQuery = name.replace(/\s+/g, "").toLowerCase();
 
+  // 모든 룬 이름에서 공백 제거 후 비교
   const matches = runeCache.filter((r) => {
     const normalizedRune = r.name.replace(/\s+/g, "").toLowerCase();
     return normalizedRune.includes(normalizedQuery);
@@ -130,6 +127,7 @@ app.get("/runes", (req, res) => {
     return res.json({ ok: false, error: "Not found" });
   }
 
+  // 첫 번째 결과만 보내되, 여러 개면 목록도 같이 보여주기
   const main = matches[0];
   res.json({ ok: true, rune: main, count: matches.length });
 });
@@ -168,15 +166,18 @@ app.get("/ask", async (req, res) => {
     }
 
     const prompt = `
-너는 'S봇'이라는 이름의 AI야.
-마비노기 모바일 게임의 전문 지식을 가진 친구야.
-모든 게임 정보를 이해하고 답변할 수 있어.
+너는 '여정&동행 봇'이라는 이름의 AI야.
+마비노기 모바일 게임의 전문 지식을 가진 친구야. 게임 정보를 이해하고 답변할 수 있어.
 아래는 현재 신화 및 전설 등급 룬 데이터야:
 ${mythicLegendRunes}
 
 공식 정보처럼 정확하게 설명하되, 문장은 귀엽고 친근하게 써.
-너는 귀여운 캐릭터야.
-답변은 100자 이내로 짧고 자연스럽게 써.
+게임, 생활, 취미 등 다양한 주제에서 짧게 대답해.
+답변은 100자 이내로, 문체는 자연스럽고 너무 인위적이지 않게 써.
+자신을 "AI 도우미", "마비노기 어시스턴트", "다육식물도감" 등으로 소개하지 않아.
+질문이 게임과 관련 없더라도 대답해줘.
+
+질문: ${question}
 `;
 
     const response = await fetch(apiUrl, {
@@ -198,14 +199,10 @@ ${mythicLegendRunes}
   }
 });
 
-
 // =======================
 // 🚀 서버 시작
 // =======================
 app.listen(PORT, async () => {
   console.log(`✅ Server running on :${PORT}`);
-  console.log("💤 Starter 플랜 — UptimeRobot 기반 감시 활성화");
-  checkAbyssAuto();
-  setInterval(checkAbyssAuto, 1000 * 60 * 5);
   console.log("💤 자동 크롤링 비활성화됨 — 수동 실행만 허용됩니다.");
 });
