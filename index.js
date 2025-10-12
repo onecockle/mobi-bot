@@ -50,6 +50,30 @@ async function launchBrowser() {
   });
   return browser;
 }
+// ========= Discord Webhook helper =========
+async function sendDiscord(text) {
+  const url = process.env.DISCORD_WEBHOOK_URL;
+  if (!url) throw new Error("DISCORD_WEBHOOK_URL 환경변수가 없습니다.");
+
+  const payload = {
+    content: text,           // 기본 텍스트
+    // 필요하면 embeds 도 추가 가능
+    // embeds: [{ title: "테스트", description: text, color: 0x5865F2 }],
+  };
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`Discord webhook error: ${resp.status} ${resp.statusText} ${body}`);
+  }
+}
+
+
 
 // =======================
 // 🔄 룬 크롤링 (수동 전용)
@@ -157,6 +181,23 @@ app.get("/admin/crawl-now", async (req, res) => {
   }
 });
 
+// ========= 디스코드 웹훅 테스트 =========
+// 예) GET /admin/test-discord
+// 예) GET /admin/test-discord?text=안녕_웹훅
+app.get("/admin/test-discord", async (req, res) => {
+  try {
+    const msg = req.query.text
+      ? String(req.query.text).slice(0, 1500)  // 길이 안전
+      : "✅ 디스코드 웹훅 연결 테스트 성공! (mobi-bot)";
+
+    await sendDiscord(msg);
+    res.json({ ok: true, sent: msg, at: new Date().toISOString() });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+
 // 룬 검색
 app.get("/runes", (req, res) => {
   const name = req.query.name?.trim();
@@ -190,6 +231,7 @@ app.get("/health", (req, res) => {
     },
   });
 });
+
 
 // =======================
 // 🔹 Gemini 프록시 (/ask)
