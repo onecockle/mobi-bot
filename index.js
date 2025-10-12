@@ -1,5 +1,10 @@
 // =======================
-// index.js (수동 크롤링 전용 안정 버전)
+// index.js (통합 안정 버전)
+// - 수동 룬 크롤링
+// - /runes 검색 API
+// - /ask (Gemini 프록시)
+// - 라사 서버 어비스/센마이 평원 감지 → 디스코드 알림 (5분마다)
+// - /admin/abyss-check 수동 트리거
 // =======================
 
 import express from "express";
@@ -9,19 +14,31 @@ import fs from "fs";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-let runeCache = [];
-let lastLoadedAt = null;
+// ===== ENV =====
+const GEMINI_API_KEY   = process.env.GEMINI_API_KEY || ""; // 필수(ask 사용 시)
+const DISCORD_WEBHOOK  = process.env.DISCORD_WEBHOOK || ""; // 디스코드 웹훅 URL
+// 테스트로 하드코딩하려면 아래처럼 사용 가능
+// const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/xxxx/xxxx";
+
+// ===== 공용 상태 =====
+let runeCache = [];           // 메모리 캐시
+let lastLoadedAt = null;      // 룬 크롤 시각
+const RUNE_JSON_PATH = "./runes.json";
+
+// ---- 어비스 감지 상태 (중복알림 방지) ----
+let lastSeen = { abyss: false, senmai: false }; // 직전 체크 시 활성 여부
+let lastSentAt = { abyss: 0, senmai: 0 };       // 마지막 전송 시각(ms)
+const DEDUP_WINDOW_MS = 5 * 60 * 1000;          // 5분 중복 방지
+let lastAbyssCheckAt = null;
 
 // =======================
-// 🔄 룬 크롤링 함수
+// 공용: 브라우저 런처
 // =======================
-async function crawlRunes() {
-  console.log("🔄 Puppeteer 크롤링 시작...");
-  console.log("🧭 Chrome Path:", process.env.PUPPETEER_EXECUTABLE_PATH);
-
+async function launchBrowser() {
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
   const browser = await puppeteer.launch({
     headless: "new",
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    executablePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -31,8 +48,19 @@ async function crawlRunes() {
       "--single-process",
     ],
   });
+  return browser;
+}
 
+// =======================
+// 🔄 룬 크롤링 (수동 전용)
+// =======================
+async function crawlRunes() {
+  console.log("🔄 Puppeteer 크롤링 시작...");
+  console.log("🧭 Chrome Path:", process.env.PUPPETEER_EXECUTABLE_PATH);
+
+  const browser = await launchBrowser();
   const page = await browser.newPage();
+
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
   );
@@ -44,36 +72,41 @@ async function crawlRunes() {
   });
 
   // Cloudflare 회피 대기
-  await new Promise((resolve) => setTimeout(resolve, 7000));
+  await new Promise((r) => setTimeout(r, 7000));
 
-  // 룬 테이블 로드 대기
   try {
     await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 40000 });
-  } catch (e) {
+  } catch {
+    await browser.close();
     throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
   }
 
   const html = await page.content();
   if (html.includes("Just a moment")) {
+    await browser.close();
     throw new Error("⚠️ Cloudflare challenge detected. Try again later.");
   }
 
   console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
-
-  // ====== 룬 테이블 크롤링 ======
   const runeData = await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
+    const rows = Array.from(
+      document.querySelectorAll('tr[data-slot="table-row"]')
+    );
     return rows.map((row) => {
       const imgTag = row.querySelector("img");
       const img = imgTag
-        ? imgTag.src.replace(/^\/_next\/image\?url=/, "https://mabimobi.life/_next/image?url=")
+        ? imgTag.src.replace(
+            /^\/_next\/image\?url=/,
+            "https://mabimobi.life/_next/image?url="
+          )
         : "";
 
       const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
 
       const nameEl =
-        row.querySelector("td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']") ||
-        row.querySelector("td:nth-child(3) span:last-child");
+        row.querySelector(
+          "td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']"
+        ) || row.querySelector("td:nth-child(3) span:last-child");
       const name = nameEl ? nameEl.innerText.trim() : "";
 
       const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
@@ -87,37 +120,50 @@ async function crawlRunes() {
 
   runeCache = runeData;
   lastLoadedAt = new Date().toISOString();
-
-  fs.writeFileSync("runes.json", JSON.stringify(runeData, null, 2));
+  fs.writeFileSync(RUNE_JSON_PATH, JSON.stringify(runeData, null, 2));
   console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
 
   return runeData.length;
+}
+
+// 서버 기동 시 디스크 캐시 복구
+try {
+  if (fs.existsSync(RUNE_JSON_PATH)) {
+    const raw = fs.readFileSync(RUNE_JSON_PATH, "utf8");
+    runeCache = JSON.parse(raw);
+    lastLoadedAt = "from-disk";
+    console.log(`💾 디스크에서 ${runeCache.length}개 룬 로드`);
+  }
+} catch (e) {
+  console.warn("⚠️ 디스크 캐시 로드 실패:", e.message);
 }
 
 // =======================
 // 🧩 API 라우트
 // =======================
 
-// 🔹 수동 크롤링 실행
+// 수동 룬 크롤링
 app.get("/admin/crawl-now", async (req, res) => {
   try {
     const count = await crawlRunes();
-    res.json({ ok: true, count, message: `${count}개의 룬 데이터가 새로 저장되었습니다.` });
+    res.json({
+      ok: true,
+      count,
+      message: `${count}개의 룬 데이터가 새로 저장되었습니다.`,
+    });
   } catch (error) {
     console.error("❌ 크롤링 실패:", error);
     res.json({ ok: false, error: error.message });
   }
 });
 
-// 🔹 룬 검색
+// 룬 검색
 app.get("/runes", (req, res) => {
   const name = req.query.name?.trim();
   if (!name) return res.json({ ok: false, error: "name parameter required" });
 
-  // 전체 소문자 / 공백 제거 버전
   const normalizedQuery = name.replace(/\s+/g, "").toLowerCase();
 
-  // 모든 룬 이름에서 공백 제거 후 비교
   const matches = runeCache.filter((r) => {
     const normalizedRune = r.name.replace(/\s+/g, "").toLowerCase();
     return normalizedRune.includes(normalizedQuery);
@@ -127,84 +173,198 @@ app.get("/runes", (req, res) => {
     return res.json({ ok: false, error: "Not found" });
   }
 
-  // 첫 번째 결과만 보내되, 여러 개면 목록도 같이 보여주기
   const main = matches[0];
   res.json({ ok: true, rune: main, count: matches.length });
 });
 
-// 🔹 서버 상태
+// 헬스
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
     items: runeCache.length,
     lastLoadedAt,
+    abyss: {
+      lastAbyssCheckAt,
+      lastSentAt,
+      lastSeen,
+    },
   });
 });
 
-// 🔹 Gemini AI 프록시
+// =======================
+// 🔹 Gemini 프록시 (/ask)
+// =======================
 app.get("/ask", async (req, res) => {
   const question = req.query.question;
   if (!question) return res.json({ ok: false, error: "question parameter required" });
 
+  if (!GEMINI_API_KEY) {
+    return res.json({ ok: false, error: "GEMINI_API_KEY is not set" });
+  }
+
   try {
     const apiUrl =
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
-      process.env.GEMINI_API_KEY;
+      GEMINI_API_KEY;
 
-    let mythicLegendRunes = "";
+    // 신화/전설 일부를 프롬프트에 보강(있으면)
+    let mythicLegend = "";
     try {
       if (runeCache && runeCache.length > 0) {
-        const filtered = runeCache.filter((r) => r.grade === "신화" || r.grade === "전설");
-        if (filtered.length > 0) {
-          mythicLegendRunes = filtered.map((r) => `${r.name} (${r.grade})`).join(", ");
-        } else {
-          mythicLegendRunes = "현재 신화/전설 등급 룬 데이터를 불러오지 못했뇽!";
-        }
+        mythicLegend = runeCache
+          .filter((r) => r.grade === "신화" || r.grade === "전설")
+          .slice(0, 50)
+          .map((r) => `${r.name}(${r.grade})`)
+          .join(", ");
       }
-    } catch (err) {
-      console.warn("⚠️ runeCache 필터링 실패:", err.message);
-    }
+    } catch {}
 
     const prompt = `
-너는 'S봇'이라는 이름의 AI야.
-마비노기 모바일 게임의 전문 지식을 가진 친구야. 게임 정보를 이해하고 답변할 수 있어.
-아래는 현재 신화 및 전설 등급 룬 데이터야:
-${mythicLegendRunes}
-
-공식 정보처럼 정확하게 설명하되, 문장은 귀엽고 친근하게 써.
-가끔 뇽체 써줘. (ex.반갑다뇽~!, 고맙다뇽)
-게임, 생활, 취미 등 다양한 주제에서 짧게 대답해.
-답변은 100자 이내로, 문체는 자연스럽고 너무 인위적이지 않게 써.
-자신을 "AI 도우미", "마비노기 어시스턴트", "다육식물도감" 등으로 소개하지 않아.
-질문이 게임과 관련 없더라도 대답해줘.
-모르는 정보를 물어보면 퐉씨! 그런건 모른다뇽 라고 대답해도 돼. 다만, 자주 말하지마.
-
+너는 '여정&동행 봇'이야. 답변은 100자 내외로 자연스럽게.
+필요시 다음 룬 데이터 참조: ${mythicLegend || "데이터 없음"}
 질문: ${question}
 `;
 
-    const response = await fetch(apiUrl, {
+    const resp = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-      }),
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     });
 
-    const data = await response.json();
-    const answer = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-    const fallback = "퐉씨! 답하기 쉽게 물어보라뇽 💬";
-    const finalAnswer = answer && answer.length > 10 ? answer : fallback;
+    const data = await resp.json();
+    const answer =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
+      "응답이 없어요.";
 
-    res.json({ ok: true, answer: finalAnswer });
+    res.json({ ok: true, answer });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
 });
 
 // =======================
-// 🚀 서버 시작
+// 🔔 라사 어비스/센마이 감지 + 디스코드
+// =======================
+async function checkAbyssAndNotify() {
+  lastAbyssCheckAt = new Date().toISOString();
+  const browser = await launchBrowser();
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    );
+    await page.goto("https://mabimobi.life/", {
+      waitUntil: "domcontentloaded",
+      timeout: 120000,
+    });
+
+    // 초기 로딩 안정화
+    await new Promise((r) => setTimeout(r, 4000));
+
+    // 심층 구멍 알림 패널 근처 텍스트에 '라사'가 있는지(서버 선택 라사) + 타일들 수집
+    const status = await page.evaluate(() => {
+      const result = { isRasa: false, abyssActive: false, senmaiActive: false };
+
+      // 서버 드롭다운(라사) 텍스트 탐색
+      const btns = Array.from(document.querySelectorAll("button[role='combobox'],button"));
+      for (const b of btns) {
+        const t = (b.innerText || "").trim();
+        if (t.includes("라사")) {
+          result.isRasa = true;
+          break;
+        }
+      }
+
+      // 심층 구멍 섹션 후보(헤더에 '심층 구멍 알림' 포함)
+      const headers = Array.from(document.querySelectorAll("h3"));
+      const panel = headers.find(h => (h.innerText || "").includes("심층") && h.closest("div"));
+      const root = panel ? panel.closest("div") : document;
+
+      // 타일 추출: opacity-50 있으면 비활성 추정
+      const tiles = Array.from(root.querySelectorAll("div.grid div"));
+      for (const tile of tiles) {
+        const text = (tile.innerText || "").replace(/\s+/g, " ").trim();
+        const inactive = tile.className.includes("opacity-50");
+
+        if (/어비스/.test(text)) {
+          if (!inactive) result.abyssActive = true;
+        }
+        if (/센마이\s*평원/.test(text)) {
+          if (!inactive) result.senmaiActive = true;
+        }
+      }
+      return result;
+    });
+
+    // 라사 서버가 감지되지 않으면 패스(사이트 기본 서버가 바뀐 경우)
+    if (!status.isRasa) {
+      console.log("ℹ️ 라사 서버 UI를 찾지 못함(서버 선택이 다른 값일 수 있음)");
+    }
+
+    const now = Date.now();
+    const messages = [];
+
+    // 어비스
+    if (status.abyssActive && (!lastSeen.abyss || now - lastSentAt.abyss > DEDUP_WINDOW_MS)) {
+      messages.push("🟣 **라사 서버 어비스**가 감지되었습니다!");
+      lastSentAt.abyss = now;
+    }
+    // 센마이 평원
+    if (status.senmaiActive && (!lastSeen.senmai || now - lastSentAt.senmai > DEDUP_WINDOW_MS)) {
+      messages.push("🟡 **라사 서버 센마이 평원**이 감지되었습니다!");
+      lastSentAt.senmai = now;
+    }
+
+    // 상태 갱신 (다음 반복 대비)
+    lastSeen.abyss = status.abyssActive;
+    lastSeen.senmai = status.senmaiActive;
+
+    // 디스코드 전송
+    if (DISCORD_WEBHOOK && messages.length > 0) {
+      const content =
+        messages.join("\n") +
+        `\n\n(중복 방지: 같은 항목은 5분 내 재발송 안 함)\n⏱️ ${new Date().toLocaleString("ko-KR")}`;
+      await fetch(DISCORD_WEBHOOK, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      console.log("📣 Discord 통보:", content);
+    } else {
+      if (!DISCORD_WEBHOOK && messages.length > 0) {
+        console.log("⚠️ DISCORD_WEBHOOK 미설정. 콘솔에만 출력:", messages);
+      } else {
+        console.log("ℹ️ 보낼 새 알림 없음.");
+      }
+    }
+  } catch (e) {
+    console.error("❌ 어비스 체크 실패:", e.message);
+  } finally {
+    try { await browser.close(); } catch {}
+  }
+}
+
+// 수동 트리거
+app.get("/admin/abyss-check", async (req, res) => {
+  try {
+    await checkAbyssAndNotify();
+    res.json({ ok: true, checkedAt: lastAbyssCheckAt, lastSeen, lastSentAt });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// =======================
+// 🚀 서버 시작 + 어비스 폴링 시작
 // =======================
 app.listen(PORT, async () => {
   console.log(`✅ Server running on :${PORT}`);
-  console.log("💤 자동 크롤링 비활성화됨 — 수동 실행만 허용됩니다.");
+  console.log("💤 룬 자동 크롤링은 꺼져 있음(수동 /admin/crawl-now).");
+
+  // 5분마다 어비스/센마이 감지
+  const intervalMs = 5 * 60 * 1000;
+  console.log(`🕒 어비스 감지 타이머 시작: ${intervalMs / 60000}분 간격`);
+  // 즉시 1회 실행 후, 주기 반복
+  checkAbyssAndNotify();
+  setInterval(checkAbyssAndNotify, intervalMs);
 });
