@@ -15,8 +15,8 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 // ===== ENV =====
-const GEMINI_API_KEY   = process.env.GEMINI_API_KEY || ""; // 필수(ask 사용 시)
-const DISCORD_WEBHOOK  = process.env.DISCORD_WEBHOOK || ""; // 디스코드 웹훅 URL
+const GEMINI_API_KEY   = process.env.GEMINI_API_KEY || "AIzaSyB6ElQ5Oe3SfclNWqF8ZwWIUc4Og4UXR5g"; // 필수(ask 사용 시)
+const DISCORD_WEBHOOK  = process.env.DISCORD_WEBHOOK || "https://discordapp.com/api/webhooks/1426752338617700472/oms1AP5mh9DEV70zNTVYcsqoMlkqnZ52uhQ8_ELhiTu5N7Nup1guSKko7PDdRuTcrgBS"; // 디스코드 웹훅 URL
 // 테스트로 하드코딩하려면 아래처럼 사용 가능
 // const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/xxxx/xxxx";
 
