@@ -293,104 +293,133 @@ app.get("/ask", async (req, res) => {
 });
 
 // =======================
-// 🔔 라사 어비스/센마이 감지 + 디스코드
+// 🔔 라사 서버 어비스/센마이 평원 감지 + 디스코드 알림 (최신 DOM 대응)
 // =======================
 async function checkAbyssAndNotify() {
-  lastAbyssCheckAt = new Date().toISOString();
   const browser = await launchBrowser();
+  lastAbyssCheckAt = new Date().toISOString();
+
   try {
     const page = await browser.newPage();
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     );
-    await page.goto("https://mabimobi.life/", {
+
+    // 🕸️ 페이지 접속
+    await page.goto("https://mabimobi.app/", {
       waitUntil: "domcontentloaded",
       timeout: 120000,
     });
 
-    // 초기 로딩 안정화
-    await new Promise((r) => setTimeout(r, 4000));
+    // 약간 대기 (Cloudflare 방지)
+    await new Promise((r) => setTimeout(r, 5000));
 
-    // 심층 구멍 알림 패널 근처 텍스트에 '라사'가 있는지(서버 선택 라사) + 타일들 수집
+    // 🧩 페이지에서 상태 파싱
     const status = await page.evaluate(() => {
-      const result = { isRasa: false, abyssActive: false, senmaiActive: false };
+      const result = {
+        server: null,
+        connected: false,
+        abyss: { active: false, status: "", color: "" },
+        senmai: { active: false, status: "", color: "" },
+      };
 
-      // 서버 드롭다운(라사) 텍스트 탐색
-      const btns = Array.from(document.querySelectorAll("button[role='combobox'],button"));
-      for (const b of btns) {
-        const t = (b.innerText || "").trim();
-        if (t.includes("라사")) {
-          result.isRasa = true;
-          break;
-        }
+      // 서버 이름
+      result.server =
+        document
+          .querySelector("button[role='combobox'] span[data-slot='select-value']")
+          ?.innerText?.trim() || "";
+
+      // 연결 상태
+      const indicator = document.querySelector("div[title]");
+      if (indicator && indicator.getAttribute("title")?.includes("연결")) {
+        result.connected = true;
       }
 
-      // 심층 구멍 섹션 후보(헤더에 '심층 구멍 알림' 포함)
-      const headers = Array.from(document.querySelectorAll("h3"));
-      const panel = headers.find(h => (h.innerText || "").includes("심층") && h.closest("div"));
-      const root = panel ? panel.closest("div") : document;
-
-      // 타일 추출: opacity-50 있으면 비활성 추정
-      const tiles = Array.from(root.querySelectorAll("div.grid div"));
+      // 던전 타일들
+      const tiles = Array.from(document.querySelectorAll("div.grid div.w-full"));
       for (const tile of tiles) {
-        const text = (tile.innerText || "").replace(/\s+/g, " ").trim();
-        const inactive = tile.className.includes("opacity-50");
+        const name = tile.innerText.trim();
+        const isActive = !tile.className.includes("opacity-50");
+        const color = tile.style.backgroundColor || "";
+        const label = tile.innerText.includes("예상")
+          ? "예상"
+          : tile.innerText.includes("출현")
+          ? "출현"
+          : "";
 
-        if (/어비스/.test(text)) {
-          if (!inactive) result.abyssActive = true;
+        if (name.includes("어비스")) {
+          result.abyss = { active: isActive, status: label, color };
         }
-        if (/센마이\s*평원/.test(text)) {
-          if (!inactive) result.senmaiActive = true;
+        if (name.includes("센마이")) {
+          result.senmai = { active: isActive, status: label, color };
         }
       }
+
       return result;
     });
 
-    // 라사 서버가 감지되지 않으면 패스(사이트 기본 서버가 바뀐 경우)
-    if (!status.isRasa) {
-      console.log("ℹ️ 라사 서버 UI를 찾지 못함(서버 선택이 다른 값일 수 있음)");
+    console.log("🌍 감지 결과:", status);
+
+    // 서버 확인
+    if (status.server !== "라사") {
+      console.log(`⚠️ 현재 서버가 라사가 아닙니다 (${status.server || "미검출"})`);
+      return;
     }
 
+    // 연결 안됨이면 패스
+    if (!status.connected) {
+      console.log("⚠️ 사이트 연결 상태가 불안정합니다 (재시도 대기)");
+      return;
+    }
+
+    // 🔔 알림 처리 로직
     const now = Date.now();
     const messages = [];
 
-    // 어비스
-    if (status.abyssActive && (!lastSeen.abyss || now - lastSentAt.abyss > DEDUP_WINDOW_MS)) {
-      messages.push("🟣 **라사 서버 어비스**가 감지되었습니다!");
+    // 어비스 감지
+    if (
+      status.abyss.active &&
+      (!lastSeen.abyss || now - lastSentAt.abyss > DEDUP_WINDOW_MS)
+    ) {
+      const label = status.abyss.status || "활성화됨";
+      messages.push(`🟣 **라사 서버 어비스 구멍 (${label})** 감지됨!`);
       lastSentAt.abyss = now;
     }
-    // 센마이 평원
-    if (status.senmaiActive && (!lastSeen.senmai || now - lastSentAt.senmai > DEDUP_WINDOW_MS)) {
-      messages.push("🟡 **라사 서버 센마이 평원**이 감지되었습니다!");
+
+    // 센마이 평원 감지
+    if (
+      status.senmai.active &&
+      (!lastSeen.senmai || now - lastSentAt.senmai > DEDUP_WINDOW_MS)
+    ) {
+      const label = status.senmai.status || "활성화됨";
+      messages.push(`🟡 **라사 서버 센마이 평원 (${label})** 감지됨!`);
       lastSentAt.senmai = now;
     }
 
-    // 상태 갱신 (다음 반복 대비)
-    lastSeen.abyss = status.abyssActive;
-    lastSeen.senmai = status.senmaiActive;
+    // 상태 저장
+    lastSeen.abyss = status.abyss.active;
+    lastSeen.senmai = status.senmai.active;
 
     // 디스코드 전송
-    if (DISCORD_WEBHOOK && messages.length > 0) {
+    if (messages.length > 0) {
       const content =
         messages.join("\n") +
-        `\n\n(중복 방지: 같은 항목은 5분 내 재발송 안 함)\n⏱️ ${new Date().toLocaleString("ko-KR")}`;
+        `\n\n(중복 방지: 5분 내 재발송 안 함)\n⏱️ ${new Date().toLocaleString("ko-KR")}`;
       await fetch(DISCORD_WEBHOOK, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
       });
-      console.log("📣 Discord 통보:", content);
+      console.log("📣 Discord 통보 완료:", content);
     } else {
-      if (!DISCORD_WEBHOOK && messages.length > 0) {
-        console.log("⚠️ DISCORD_WEBHOOK 미설정. 콘솔에만 출력:", messages);
-      } else {
-        console.log("ℹ️ 보낼 새 알림 없음.");
-      }
+      console.log("ℹ️ 보낼 새 알림 없음.");
     }
-  } catch (e) {
-    console.error("❌ 어비스 체크 실패:", e.message);
+  } catch (err) {
+    console.error("❌ 어비스 체크 실패:", err.message);
   } finally {
-    try { await browser.close(); } catch {}
+    try {
+      await browser.close();
+    } catch {}
   }
 }
 
