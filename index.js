@@ -293,7 +293,7 @@ app.get("/ask", async (req, res) => {
 });
 
 // =======================
-// 🔔 라사 서버 어비스/센마이 평원 감지 + 디스코드 알림 (최신 DOM 대응)
+// 🔔 라사 서버 어비스/센마이 평원 감지 + Discord Embed 알림 (mabimobi.life용)
 // =======================
 async function checkAbyssAndNotify() {
   const browser = await launchBrowser();
@@ -302,19 +302,19 @@ async function checkAbyssAndNotify() {
   try {
     const page = await browser.newPage();
     await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
     );
 
-    // 🕸️ 페이지 접속
-    await page.goto("https://mabimobi.app/", {
+    // ✅ mabimobi.life 접속
+    await page.goto("https://mabimobi.life/", {
       waitUntil: "domcontentloaded",
-      timeout: 120000,
+      timeout: 180000,
     });
 
-    // 약간 대기 (Cloudflare 방지)
+    // Cloudflare 회피용 딜레이
     await new Promise((r) => setTimeout(r, 5000));
 
-    // 🧩 페이지에서 상태 파싱
+    // 🧩 상태 파싱
     const status = await page.evaluate(() => {
       const result = {
         server: null,
@@ -323,19 +323,19 @@ async function checkAbyssAndNotify() {
         senmai: { active: false, status: "", color: "" },
       };
 
-      // 서버 이름
+      // 서버명 확인
       result.server =
         document
           .querySelector("button[role='combobox'] span[data-slot='select-value']")
           ?.innerText?.trim() || "";
 
-      // 연결 상태
+      // 연결 상태 (초록불)
       const indicator = document.querySelector("div[title]");
       if (indicator && indicator.getAttribute("title")?.includes("연결")) {
         result.connected = true;
       }
 
-      // 던전 타일들
+      // 던전 카드 탐색
       const tiles = Array.from(document.querySelectorAll("div.grid div.w-full"));
       for (const tile of tiles) {
         const name = tile.innerText.trim();
@@ -360,57 +360,73 @@ async function checkAbyssAndNotify() {
 
     console.log("🌍 감지 결과:", status);
 
-    // 서버 확인
+    // 서버가 라사가 아닐 경우 패스
     if (status.server !== "라사") {
       console.log(`⚠️ 현재 서버가 라사가 아닙니다 (${status.server || "미검출"})`);
       return;
     }
 
-    // 연결 안됨이면 패스
+    // 연결 안됨 → 무시
     if (!status.connected) {
-      console.log("⚠️ 사이트 연결 상태가 불안정합니다 (재시도 대기)");
+      console.log("⚠️ 사이트 연결이 불안정합니다 (재시도 대기)");
       return;
     }
 
-    // 🔔 알림 처리 로직
     const now = Date.now();
-    const messages = [];
+    const embeds = [];
 
-    // 어비스 감지
+    // 🟣 어비스 감지
     if (
       status.abyss.active &&
       (!lastSeen.abyss || now - lastSentAt.abyss > DEDUP_WINDOW_MS)
     ) {
-      const label = status.abyss.status || "활성화됨";
-      messages.push(`🟣 **라사 서버 어비스 구멍 (${label})** 감지됨!`);
       lastSentAt.abyss = now;
+      embeds.push({
+        title: "🟣 라사서버 어비스 구멍 감지됨!",
+        description: `**상태:** ${status.abyss.status || "활성화됨"}\n**시간:** ${new Date().toLocaleString("ko-KR")}`,
+        color: 0x9b59b6,
+        footer: { text: "어비스봇 감지 시스템" },
+        timestamp: new Date().toISOString(),
+      });
     }
 
-    // 센마이 평원 감지
+    // 🟡 센마이 평원 감지
     if (
       status.senmai.active &&
       (!lastSeen.senmai || now - lastSentAt.senmai > DEDUP_WINDOW_MS)
     ) {
-      const label = status.senmai.status || "활성화됨";
-      messages.push(`🟡 **라사 서버 센마이 평원 (${label})** 감지됨!`);
       lastSentAt.senmai = now;
+      embeds.push({
+        title: "🟡 라사서버 센마이평원 심구 감지됨!",
+        description: `**상태:** ${status.senmai.status || "활성화됨"}\n**시간:** ${new Date().toLocaleString("ko-KR")}`,
+        color: 0xf1c40f,
+        footer: { text: "어비스봇 감지 시스템" },
+        timestamp: new Date().toISOString(),
+      });
     }
 
-    // 상태 저장
+    // 상태 갱신
     lastSeen.abyss = status.abyss.active;
     lastSeen.senmai = status.senmai.active;
 
-    // 디스코드 전송
-    if (messages.length > 0) {
-      const content =
-        messages.join("\n") +
-        `\n\n(중복 방지: 5분 내 재발송 안 함)\n⏱️ ${new Date().toLocaleString("ko-KR")}`;
-      await fetch(DISCORD_WEBHOOK, {
+    // 📨 Discord 전송
+    if (embeds.length > 0) {
+      const payload = {
+        username: "어비스봇",
+        embeds,
+      };
+
+      const resp = await fetch(DISCORD_WEBHOOK, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify(payload),
       });
-      console.log("📣 Discord 통보 완료:", content);
+
+      if (!resp.ok) {
+        console.error("❌ Discord 전송 실패:", await resp.text());
+      } else {
+        console.log("📣 Discord Embed 전송 완료:", embeds.map((e) => e.title).join(", "));
+      }
     } else {
       console.log("ℹ️ 보낼 새 알림 없음.");
     }
@@ -422,6 +438,7 @@ async function checkAbyssAndNotify() {
     } catch {}
   }
 }
+
 
 // 수동 트리거
 app.get("/admin/abyss-check", async (req, res) => {
