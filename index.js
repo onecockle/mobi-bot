@@ -293,7 +293,7 @@ app.get("/ask", async (req, res) => {
 });
 
 // =======================
-// 🔔 라사 서버 어비스/센마이 평원 감지 + Discord Embed 알림 (mabimobi.life용)
+// 🔔 라사 서버 어비스/센마이 평원 감지 + Discord Embed 알림 (자동 라사 전환 통합 버전)
 // =======================
 async function checkAbyssAndNotify() {
   const browser = await launchBrowser();
@@ -311,8 +311,26 @@ async function checkAbyssAndNotify() {
       timeout: 180000,
     });
 
-    // Cloudflare 회피용 딜레이
+    // Cloudflare 회피 대기
     await new Promise((r) => setTimeout(r, 5000));
+
+    // 💡 서버 자동 전환: 기본이 데이안이면 '라사'로 변경
+    try {
+      const serverBtn = await page.$("button[role='combobox']");
+      if (serverBtn) {
+        await serverBtn.click();
+        await new Promise((r) => setTimeout(r, 500));
+        await page.evaluate(() => {
+          const options = Array.from(document.querySelectorAll("div[role='option'],button"));
+          const rasa = options.find((el) => el.innerText.includes("라사"));
+          if (rasa) rasa.click();
+        });
+        console.log("🔁 서버를 라사로 전환했습니다.");
+        await new Promise((r) => setTimeout(r, 2000)); // 전환 안정화 대기
+      }
+    } catch (e) {
+      console.log("⚠️ 서버 전환 중 오류 (무시 가능):", e.message);
+    }
 
     // 🧩 상태 파싱
     const status = await page.evaluate(() => {
@@ -323,13 +341,13 @@ async function checkAbyssAndNotify() {
         senmai: { active: false, status: "", color: "" },
       };
 
-      // 서버명 확인
+      // 서버명
       result.server =
         document
           .querySelector("button[role='combobox'] span[data-slot='select-value']")
           ?.innerText?.trim() || "";
 
-      // 연결 상태 (초록불)
+      // 연결 상태
       const indicator = document.querySelector("div[title]");
       if (indicator && indicator.getAttribute("title")?.includes("연결")) {
         result.connected = true;
@@ -360,7 +378,7 @@ async function checkAbyssAndNotify() {
 
     console.log("🌍 감지 결과:", status);
 
-    // 서버가 라사가 아닐 경우 패스
+    // 서버가 라사인지 확인
     if (status.server !== "라사") {
       console.log(`⚠️ 현재 서버가 라사가 아닙니다 (${status.server || "미검출"})`);
       return;
@@ -375,7 +393,7 @@ async function checkAbyssAndNotify() {
     const now = Date.now();
     const embeds = [];
 
-    // 🟣 어비스 감지
+    // 🟣 어비스 구멍 감지
     if (
       status.abyss.active &&
       (!lastSeen.abyss || now - lastSentAt.abyss > DEDUP_WINDOW_MS)
@@ -385,7 +403,7 @@ async function checkAbyssAndNotify() {
         title: "🟣 라사서버 어비스 구멍 감지됨!",
         description: `**상태:** ${status.abyss.status || "활성화됨"}\n**시간:** ${new Date().toLocaleString("ko-KR")}`,
         color: 0x9b59b6,
-        footer: { text: "어비스봇 감지 시스템" },
+        footer: { text: "어비스봇 시스템" },
         timestamp: new Date().toISOString(),
       });
     }
@@ -400,7 +418,7 @@ async function checkAbyssAndNotify() {
         title: "🟡 라사서버 센마이평원 심구 감지됨!",
         description: `**상태:** ${status.senmai.status || "활성화됨"}\n**시간:** ${new Date().toLocaleString("ko-KR")}`,
         color: 0xf1c40f,
-        footer: { text: "어비스봇 감지 시스템" },
+        footer: { text: " 어비스봇 시스템" },
         timestamp: new Date().toISOString(),
       });
     }
@@ -409,10 +427,10 @@ async function checkAbyssAndNotify() {
     lastSeen.abyss = status.abyss.active;
     lastSeen.senmai = status.senmai.active;
 
-    // 📨 Discord 전송
+    // 디스코드 전송
     if (embeds.length > 0) {
       const payload = {
-        username: "어비스봇",
+        username: "어비스 감지봇",
         embeds,
       };
 
@@ -438,6 +456,7 @@ async function checkAbyssAndNotify() {
     } catch {}
   }
 }
+
 
 
 // 수동 트리거
