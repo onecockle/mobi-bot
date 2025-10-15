@@ -195,7 +195,7 @@ app.get("/ask", async (req, res) => {
     const prompt = `
     너는 '여정&동행 봇'이야. 마비노기 모바일의 룬, 장비, 패치 정보를 귀엽게 알려줘.
     질문: ${question}
-    참고룬: ${mythicLegendRunes}
+    참고룬: ${mythicLegend}
     `;
 
     const response = await fetch(apiUrl, {
