@@ -85,55 +85,65 @@ async function crawlRunes() {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
   );
 
-  await page.goto("https://mabimobi.life/runes?t=search", {
-    waitUntil: "networkidle2",
-    timeout: 180000,
-  });
+  try {
+    // ✅ 라우팅/프레임 오류 대비 재시도 루프
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`🌐 페이지 접속 시도 ${attempt}/3`);
+        await page.goto("https://mabimobi.life/runes?t=search", {
+          waitUntil: "domcontentloaded", // networkidle2 대신 안정적
+          timeout: 180000,
+        });
+        break;
+      } catch (err) {
+        console.warn("⚠️ 접속 실패, 재시도:", err.message);
+        if (attempt === 3) throw err;
+        await new Promise((r) => setTimeout(r, 12000));
+      }
+    }
 
-  // Cloudflare 우회 대기
-  await new Promise((r) => setTimeout(r, 12000));
+    await new Promise((r) => setTimeout(r, 12000)); // 렌더링 대기
 
-  // 🟩 무한 스크롤 (끝까지)
-  let prevHeight = 0;
-  while (true) {
-    const height = await page.evaluate("document.body.scrollHeight");
-    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)");
-    await new Promise((r) => setTimeout(r, 1200));
+    // 🟩 무한 스크롤
+    console.log("📜 스크롤 시작...");
+    let prevHeight = 0;
+    for (let i = 0; i < 15; i++) {
+      const height = await page.evaluate("document.body.scrollHeight");
+      await page.evaluate("window.scrollTo(0, document.body.scrollHeight)");
+      await new Promise((r) => setTimeout(r, 1200));
+      const newHeight = await page.evaluate("document.body.scrollHeight");
+      if (newHeight === prevHeight) break;
+      prevHeight = newHeight;
+    }
 
-    const newHeight = await page.evaluate("document.body.scrollHeight");
-    if (newHeight === prevHeight) break; // 더 이상 로드 안됨
-    prevHeight = newHeight;
+    console.log("✅ 스크롤 완료 — 데이터 추출 중...");
+
+    // 🧩 룬 데이터 파싱
+    const runeData = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
+      return rows.map((row) => {
+        const img = row.querySelector("td:nth-child(1) img")?.src || "";
+        const category = row.querySelector("td:nth-child(2)")?.innerText.trim() || "";
+        const name = row.querySelector("td:nth-child(3) span:last-child")?.innerText.trim() || "";
+        const grade = row.querySelector("td:nth-child(4)")?.innerText.trim() || "";
+        const effect = row.querySelector("td:nth-child(5) span")?.innerText.trim() || "";
+        return { name, category, grade, effect, img };
+      }).filter(r => r.name && r.effect);
+    });
+
+    console.log(`📦 수집된 룬 개수: ${runeData.length}`);
+    runeCache = runeData;
+    lastLoadedAt = new Date().toISOString();
+    fs.writeFileSync(RUNE_JSON_PATH, JSON.stringify(runeData, null, 2));
+    console.log("💾 runes.json 저장 완료 ✅");
+
+    return runeData.length;
+  } catch (err) {
+    console.error("❌ 크롤링 중 오류 발생:", err.message);
+    throw err;
+  } finally {
+    await browser.close().catch(() => {});
   }
-
-  console.log("✅ 스크롤 완료 — 데이터 추출 중...");
-
-  const runeData = await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
-    return rows.map((row) => {
-      const img =
-        row.querySelector("td:nth-child(1) img")?.src || "";
-      const category =
-        row.querySelector("td:nth-child(2)")?.innerText.trim() || "";
-      const name =
-        row.querySelector("td:nth-child(3) span:last-child")?.innerText.trim() || "";
-      const grade =
-        row.querySelector("td:nth-child(4)")?.innerText.trim() || "";
-      const effect =
-        row.querySelector("td:nth-child(5) span")?.innerText.trim() || "";
-      return { name, category, grade, effect, img };
-    }).filter(r => r.name && r.effect);
-  });
-
-  await browser.close();
-
-  // ✅ 결과 저장
-  console.log(`📦 수집된 룬 개수: ${runeData.length}`);
-  runeCache = runeData;
-  lastLoadedAt = new Date().toISOString();
-  fs.writeFileSync(RUNE_JSON_PATH, JSON.stringify(runeData, null, 2));
-  console.log("💾 runes.json 저장 완료 ✅");
-
-  return runeData.length;
 }
 
 
