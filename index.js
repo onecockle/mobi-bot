@@ -3,6 +3,7 @@
 // - 수동 룬 크롤링
 // - /runes 검색 API
 // - /ask (Gemini 프록시)
+// - 라사 서버 어비스/센마이 평원 감지 → 디스코드 알림 (5분마다)
 // - /admin/abyss-check 수동 트리거
 // =======================
 
@@ -23,6 +24,12 @@ const DISCORD_WEBHOOK  = process.env.DISCORD_WEBHOOK || "https://discordapp.com/
 let runeCache = [];           // 메모리 캐시
 let lastLoadedAt = null;      // 룬 크롤 시각
 const RUNE_JSON_PATH = "./runes.json";
+
+// ---- 어비스 감지 상태 (중복알림 방지) ----
+let lastSeen = { abyss: false, senmai: false }; // 직전 체크 시 활성 여부
+let lastSentAt = { abyss: 0, senmai: 0 };       // 마지막 전송 시각(ms)
+const DEDUP_WINDOW_MS = 5 * 60 * 1000;          // 5분 중복 방지
+let lastAbyssCheckAt = null;
 
 // =======================
 // 공용: 브라우저 런처
@@ -256,14 +263,14 @@ app.get("/ask", async (req, res) => {
 
     const prompt = `
 너는 '뇽봇'이라는 이름의 AI야.
-너는 마비노기 모바일 전문 도우미 '뇽봇'이야.
+너는 마비노기 모바일 전문 도우미 '뇽봇'이야. 룬, 어비스, 이벤트 정보를 알려줘:
 관련 룬 데이터: ${mythicLegend}
 질문: ${question}
 
 너는 다목적 AI 어시스턴트 '뇽봇'이야.
    사람처럼 자연스럽고 따뜻하게 대답해. 
    답변은 60자 이내로, 짧고 간결하지만 친절하게 답해.
-   가끔 문장 끝에 ‘뇽’을 붙여 말해도 좋아. 예를 들어 "좋아요!" → "좋다뇽!" 정도로 말이야.
+   가끔 문장 끝에만 ‘뇽’을 붙여 말해도 좋아. 예를 들어 "좋아요!" → "좋다뇽!" 정도로.  
    너는 사랑스럽고 귀여운 캐릭터야.
    질문: ${question}
    `;
@@ -285,7 +292,182 @@ app.get("/ask", async (req, res) => {
   }
 });
 
+// =======================
+// 🔔 라사 서버 어비스/센마이 평원 감지 + Discord Embed 알림 (자동 라사 전환 통합 버전)
+// =======================
+async function checkAbyssAndNotify() {
+  const browser = await launchBrowser();
+  lastAbyssCheckAt = new Date().toISOString();
 
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+    );
+
+    // ✅ mabimobi.life 접속
+    await page.goto("https://mabimobi.life/", {
+      waitUntil: "domcontentloaded",
+      timeout: 180000,
+    });
+
+    // Cloudflare 회피 대기
+    await new Promise((r) => setTimeout(r, 5000));
+
+    // 💡 서버 자동 전환: 기본이 데이안이면 '라사'로 변경
+    try {
+      const serverBtn = await page.$("button[role='combobox']");
+      if (serverBtn) {
+        await serverBtn.click();
+        await new Promise((r) => setTimeout(r, 500));
+        await page.evaluate(() => {
+          const options = Array.from(document.querySelectorAll("div[role='option'],button"));
+          const rasa = options.find((el) => el.innerText.includes("라사"));
+          if (rasa) rasa.click();
+        });
+        console.log("🔁 서버를 라사로 전환했습니다.");
+        await new Promise((r) => setTimeout(r, 2000)); // 전환 안정화 대기
+      }
+    } catch (e) {
+      console.log("⚠️ 서버 전환 중 오류 (무시 가능):", e.message);
+    }
+
+    // 🧩 상태 파싱
+    const status = await page.evaluate(() => {
+      const result = {
+        server: null,
+        connected: false,
+        abyss: { active: false, status: "", color: "" },
+        senmai: { active: false, status: "", color: "" },
+      };
+
+      // 서버명
+      result.server =
+        document
+          .querySelector("button[role='combobox'] span[data-slot='select-value']")
+          ?.innerText?.trim() || "";
+
+      // 연결 상태
+      const indicator = document.querySelector("div[title]");
+      if (indicator && indicator.getAttribute("title")?.includes("연결")) {
+        result.connected = true;
+      }
+
+      // 던전 카드 탐색
+      const tiles = Array.from(document.querySelectorAll("div.grid div.w-full"));
+      for (const tile of tiles) {
+        const name = tile.innerText.trim();
+        const isActive = !tile.className.includes("opacity-50");
+        const color = tile.style.backgroundColor || "";
+        const label = tile.innerText.includes("예상")
+          ? "예상"
+          : tile.innerText.includes("출현")
+          ? "출현"
+          : "";
+
+        if (name.includes("어비스")) {
+          result.abyss = { active: isActive, status: label, color };
+        }
+        if (name.includes("센마이")) {
+          result.senmai = { active: isActive, status: label, color };
+        }
+      }
+
+      return result;
+    });
+
+    console.log("🌍 감지 결과:", status);
+
+    // 서버가 라사인지 확인
+    if (status.server !== "라사") {
+      console.log(`⚠️ 현재 서버가 라사가 아닙니다 (${status.server || "미검출"})`);
+      return;
+    }
+
+    // 연결 안됨 → 무시
+    if (!status.connected) {
+      console.log("⚠️ 사이트 연결이 불안정합니다 (재시도 대기)");
+      return;
+    }
+
+    const now = Date.now();
+    const embeds = [];
+
+    // 🟣 어비스 구멍 감지
+    if (
+      status.abyss.active &&
+      (!lastSeen.abyss || now - lastSentAt.abyss > DEDUP_WINDOW_MS)
+    ) {
+      lastSentAt.abyss = now;
+      embeds.push({
+        title: "🟣 라사서버 어비스 구멍 감지됨!",
+        description: `**상태:** ${status.abyss.status || "활성화됨"}\n**시간:** ${new Date().toLocaleString("ko-KR")}`,
+        color: 0x9b59b6,
+        footer: { text: "어비스봇 시스템" },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // 🟡 센마이 평원 감지
+    if (
+      status.senmai.active &&
+      (!lastSeen.senmai || now - lastSentAt.senmai > DEDUP_WINDOW_MS)
+    ) {
+      lastSentAt.senmai = now;
+      embeds.push({
+        title: "🟡 라사서버 센마이평원 심구 감지됨!",
+        description: `**상태:** ${status.senmai.status || "활성화됨"}\n**시간:** ${new Date().toLocaleString("ko-KR")}`,
+        color: 0xf1c40f,
+        footer: { text: " 어비스봇 시스템" },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // 상태 갱신
+    lastSeen.abyss = status.abyss.active;
+    lastSeen.senmai = status.senmai.active;
+
+    // 디스코드 전송
+    if (embeds.length > 0) {
+      const payload = {
+        username: "어비스 감지봇",
+        embeds,
+      };
+
+      const resp = await fetch(DISCORD_WEBHOOK, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!resp.ok) {
+        console.error("❌ Discord 전송 실패:", await resp.text());
+      } else {
+        console.log("📣 Discord Embed 전송 완료:", embeds.map((e) => e.title).join(", "));
+      }
+    } else {
+      console.log("ℹ️ 보낼 새 알림 없음.");
+    }
+  } catch (err) {
+    console.error("❌ 어비스 체크 실패:", err.message);
+  } finally {
+    try {
+      await browser.close();
+    } catch {}
+  }
+}
+
+
+
+// 수동 트리거
+app.get("/admin/abyss-check", async (req, res) => {
+  try {
+    await checkAbyssAndNotify();
+    res.json({ ok: true, checkedAt: lastAbyssCheckAt, lastSeen, lastSentAt });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
 
 // =======================
 // 🚀 서버 시작 + 어비스 폴링 시작
@@ -294,4 +476,10 @@ app.listen(PORT, async () => {
   console.log(`✅ Server running on :${PORT}`);
   console.log("💤 룬 자동 크롤링은 꺼져 있음(수동 /admin/crawl-now).");
 
+  // 5분마다 어비스/센마이 감지
+  const intervalMs = 5 * 60 * 1000;
+  console.log(`🕒 어비스 감지 타이머 시작: ${intervalMs / 60000}분 간격`);
+  // 즉시 1회 실행 후, 주기 반복
+  checkAbyssAndNotify();
+  setInterval(checkAbyssAndNotify, intervalMs);
 });
