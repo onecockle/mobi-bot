@@ -1,10 +1,6 @@
 // =======================
-// index.js (통합 안정 버전)
-// - 수동 룬 크롤링
-// - /runes 검색 API
-// - /ask (Gemini 프록시)
-// - 라사 서버 어비스/센마이 평원 감지 → 디스코드 알림 (5분마다)
-// - /admin/abyss-check 수동 트리거
+// 📦 마비노기 여정&동행봇 통합 서버 (FINAL)
+// 룬 검색 + AI 대화 + 어비스 자동 감시 + 카카오봇 알림
 // =======================
 
 import express from "express";
@@ -14,31 +10,24 @@ import fs from "fs";
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ===== ENV =====
-const GEMINI_API_KEY   = process.env.GEMINI_API_KEY || "AIzaSyB6ElQ5Oe3SfclNWqF8ZwWIUc4Og4UXR5g"; // 필수(ask 사용 시)
-const DISCORD_WEBHOOK  = process.env.DISCORD_WEBHOOK || "https://discordapp.com/api/webhooks/1426752338617700472/oms1AP5mh9DEV70zNTVYcsqoMlkqnZ52uhQ8_ELhiTu5N7Nup1guSKko7PDdRuTcrgBS"; // 디스코드 웹훅 URL
-// 테스트로 하드코딩하려면 아래처럼 사용 가능
-// const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/xxxx/xxxx";
-
-// ===== 공용 상태 =====
-let runeCache = [];           // 메모리 캐시
-let lastLoadedAt = null;      // 룬 크롤 시각
-const RUNE_JSON_PATH = "./runes.json";
-
-// ---- 어비스 감지 상태 (중복알림 방지) ----
-let lastSeen = { abyss: false, senmai: false }; // 직전 체크 시 활성 여부
-let lastSentAt = { abyss: 0, senmai: 0 };       // 마지막 전송 시각(ms)
-const DEDUP_WINDOW_MS = 5 * 60 * 1000;          // 5분 중복 방지
-let lastAbyssCheckAt = null;
+// =======================
+// 🔧 전역 상태
+// =======================
+let runeCache = [];
+let lastLoadedAt = null;
+let lastSentState = { abyss: null, senmai: null };
+let lastNotifiedAt = null;
+let isChecking = false;
 
 // =======================
-// 공용: 브라우저 런처
+// 🔄 룬 크롤링 함수
 // =======================
-async function launchBrowser() {
-  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+async function crawlRunes() {
+  console.log("🔄 Puppeteer 룬 크롤링 시작...");
+
   const browser = await puppeteer.launch({
     headless: "new",
-    executablePath,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -48,242 +37,175 @@ async function launchBrowser() {
       "--single-process",
     ],
   });
-  return browser;
-}
-// ========= Discord Webhook helper =========
-async function sendDiscord(text) {
-  const url = process.env.DISCORD_WEBHOOK_URL;
-  if (!url) throw new Error("DISCORD_WEBHOOK_URL 환경변수가 없습니다.");
 
-  const payload = {
-    content: text,           // 기본 텍스트
-    // 필요하면 embeds 도 추가 가능
-    // embeds: [{ title: "테스트", description: text, color: 0x5865F2 }],
-  };
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  const page = await browser.newPage();
+  await page.goto("https://mabimobi.life/runes?t=search", {
+    waitUntil: "domcontentloaded",
+    timeout: 180000,
   });
 
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    throw new Error(`Discord webhook error: ${resp.status} ${resp.statusText} ${body}`);
+  await new Promise(r => setTimeout(r, 7000)); // Cloudflare 우회 대기
+
+  try {
+    await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 40000 });
+  } catch {
+    throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
+  }
+
+  const runeData = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
+    return rows.map(row => {
+      const imgTag = row.querySelector("img");
+      const img = imgTag ? imgTag.src : "";
+      const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
+      const nameEl =
+        row.querySelector("td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']") ||
+        row.querySelector("td:nth-child(3) span:last-child");
+      const name = nameEl ? nameEl.innerText.trim() : "";
+      const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
+      const effect = row.querySelectorAll("td")[4]?.innerText.trim() || "";
+      return { name, category, grade, effect, img };
+    });
+  });
+
+  await browser.close();
+  runeCache = runeData;
+  lastLoadedAt = new Date().toISOString();
+
+  fs.writeFileSync("runes.json", JSON.stringify(runeData, null, 2));
+  console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
+  return runeData.length;
+}
+
+// =======================
+// 🔍 어비스 감시 (라사 서버)
+// =======================
+async function crawlAbyssStatus() {
+  console.log("🔍 mabimobi.life 라사 서버 감시 시작...");
+
+  const browser = await puppeteer.launch({
+    headless: "new",
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-extensions",
+      "--disable-gpu",
+      "--single-process",
+    ],
+  });
+
+  const page = await browser.newPage();
+  await page.goto("https://mabimobi.life/", { waitUntil: "networkidle2", timeout: 60000 });
+  await page.waitForSelector("h3", { timeout: 20000 });
+
+  const info = await page.evaluate(() => {
+    const section = Array.from(document.querySelectorAll("h3")).find(h =>
+      h.innerText.includes("심층")
+    );
+    if (!section) return [];
+
+    const root = section.closest("div");
+    const slots = root.querySelectorAll("div.grid > div");
+    const results = [];
+
+    slots.forEach(div => {
+      const name = div.querySelector("span.text-xs")?.innerText?.trim() || "";
+      const time = div.querySelector("span.font-noto-sans")?.innerText?.trim() || "";
+      const status = div.querySelector("span.text-white.font-bold")?.innerText?.trim() || "";
+      results.push({ name, time, status });
+    });
+
+    return results.filter(x => ["어비스", "센마이 평원"].includes(x.name));
+  });
+
+  await browser.close();
+  console.log("✅ 어비스 정보:", info);
+  return info;
+}
+
+// =======================
+// 💬 카카오봇 Webhook 알림
+// =======================
+async function sendKakaoMessage(text) {
+  try {
+    const webhookUrl = process.env.KAKAO_WEBHOOK_URL;
+    if (!webhookUrl) return console.warn("⚠️ KAKAO_WEBHOOK_URL이 설정되지 않음");
+
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text }),
+    });
+
+    console.log("📤 카카오봇으로 알림 전송:", text);
+  } catch (err) {
+    console.error("⚠️ Webhook 전송 실패:", err.message);
   }
 }
 
-
-
-// 🔄 룬 크롤링 (수정 버전)
-async function crawlRunes() {
-  console.log("🔄 룬 크롤링 시작...");
-  const browser = await launchBrowser();
-  const page = await browser.newPage();
-
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-  );
+// =======================
+// 🔁 5분마다 어비스 자동 감시
+// =======================
+async function checkAbyssAuto() {
+  if (isChecking) return;
+  isChecking = true;
 
   try {
-    // ✅ 라우팅/프레임 오류 대비 재시도 루프
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        console.log(`🌐 페이지 접속 시도 ${attempt}/3`);
-        await page.goto("https://mabimobi.life/runes?t=search", {
-          waitUntil: "domcontentloaded", // networkidle2 대신 안정적
-          timeout: 180000,
-        });
-        break;
-      } catch (err) {
-        console.warn("⚠️ 접속 실패, 재시도:", err.message);
-        if (attempt === 3) throw err;
-        await new Promise((r) => setTimeout(r, 12000));
+    const info = await crawlAbyssStatus();
+    if (!info || info.length === 0) return;
+
+    for (const item of info) {
+      const key = item.name === "어비스" ? "abyss" : "senmai";
+      const prev = lastSentState[key];
+      const current = `${item.status || "미확인"} ${item.time || ""}`.trim();
+
+      if (prev !== current && item.status) {
+        await sendKakaoMessage(`🔔 ${item.name} 새 상태 감지!\n📅 ${current}`);
+        lastSentState[key] = current;
+        lastNotifiedAt = new Date().toISOString();
       }
     }
-
-    await new Promise((r) => setTimeout(r, 12000)); // 렌더링 대기
-
-    // 🟩 무한 스크롤
-    console.log("📜 스크롤 시작...");
-    let prevHeight = 0;
-    for (let i = 0; i < 15; i++) {
-      const height = await page.evaluate("document.body.scrollHeight");
-      await page.evaluate("window.scrollTo(0, document.body.scrollHeight)");
-      await new Promise((r) => setTimeout(r, 1200));
-      const newHeight = await page.evaluate("document.body.scrollHeight");
-      if (newHeight === prevHeight) break;
-      prevHeight = newHeight;
-    }
-
-    console.log("✅ 스크롤 완료 — 데이터 추출 중...");
-
-    // 🧩 룬 데이터 파싱
-    const runeData = await page.evaluate(() => {
-      const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
-      return rows.map((row) => {
-        const img = row.querySelector("td:nth-child(1) img")?.src || "";
-        const category = row.querySelector("td:nth-child(2)")?.innerText.trim() || "";
-        const name = row.querySelector("td:nth-child(3) span:last-child")?.innerText.trim() || "";
-        const grade = row.querySelector("td:nth-child(4)")?.innerText.trim() || "";
-        const effect = row.querySelector("td:nth-child(5) span")?.innerText.trim() || "";
-        return { name, category, grade, effect, img };
-      }).filter(r => r.name && r.effect);
-    });
-
-    console.log(`📦 수집된 룬 개수: ${runeData.length}`);
-    runeCache = runeData;
-    lastLoadedAt = new Date().toISOString();
-    fs.writeFileSync(RUNE_JSON_PATH, JSON.stringify(runeData, null, 2));
-    console.log("💾 runes.json 저장 완료 ✅");
-
-    return runeData.length;
   } catch (err) {
-    console.error("❌ 크롤링 중 오류 발생:", err.message);
-    throw err;
+    console.error("❌ 감시 실패:", err.message);
   } finally {
-    await browser.close().catch(() => {});
+    isChecking = false;
   }
 }
 
-
-
-// 서버 기동 시 디스크 캐시 복구
-try {
-  if (fs.existsSync(RUNE_JSON_PATH)) {
-    const raw = fs.readFileSync(RUNE_JSON_PATH, "utf8");
-    runeCache = JSON.parse(raw);
-    lastLoadedAt = "from-disk";
-    console.log(`💾 디스크에서 ${runeCache.length}개 룬 로드`);
-  }
-} catch (e) {
-  console.warn("⚠️ 디스크 캐시 로드 실패:", e.message);
-}
-
 // =======================
-// 🧩 API 라우트
-// =======================
-
-// 수동 룬 크롤링
-app.get("/admin/crawl-now", async (req, res) => {
-  try {
-    const count = await crawlRunes();
-    res.json({
-      ok: true,
-      count,
-      message: `${count}개의 룬 데이터가 새로 저장되었습니다.`,
-    });
-  } catch (error) {
-    console.error("❌ 크롤링 실패:", error);
-    res.json({ ok: false, error: error.message });
-  }
-});
-
-// ========= 디스코드 웹훅 테스트 =========
-// 예) GET /admin/test-discord
-// 예) GET /admin/test-discord?text=안녕_웹훅
-app.get("/admin/test-discord", async (req, res) => {
-  try {
-    const msg = req.query.text
-      ? String(req.query.text).slice(0, 1500)  // 길이 안전
-      : "✅ 디스코드 웹훅 연결 테스트 성공! (mobi-bot)";
-
-    await sendDiscord(msg);
-    res.json({ ok: true, sent: msg, at: new Date().toISOString() });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
-});
-
-
-// 룬 검색
-app.get("/runes", (req, res) => {
-  const name = req.query.name?.trim();
-  if (!name) return res.json({ ok: false, error: "name parameter required" });
-
-  const normalizedQuery = name.replace(/\s+/g, "").toLowerCase();
-
-  const matches = runeCache.filter((r) => {
-    const normalizedRune = r.name.replace(/\s+/g, "").toLowerCase();
-    return normalizedRune.includes(normalizedQuery);
-  });
-
-  if (matches.length === 0) {
-    return res.json({ ok: false, error: "Not found" });
-  }
-
-  const main = matches[0];
-  res.json({ ok: true, rune: main, count: matches.length });
-});
-
-// 헬스
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    items: runeCache.length,
-    lastLoadedAt,
-    abyss: {
-      lastAbyssCheckAt,
-      lastSentAt,
-      lastSeen,
-    },
-  });
-});
-
-
-// =======================
-// 🔹 Gemini 프록시 (/ask)
+// 🤖 Gemini AI 프록시
 // =======================
 app.get("/ask", async (req, res) => {
   const question = req.query.question;
   if (!question) return res.json({ ok: false, error: "question parameter required" });
 
-  if (!GEMINI_API_KEY) {
-    return res.json({ ok: false, error: "GEMINI_API_KEY is not set" });
-  }
-
   try {
     const apiUrl =
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
-      GEMINI_API_KEY;
+      process.env.GEMINI_API_KEY;
 
-    // 신화/전설 일부를 프롬프트에 보강(있으면)
-    let mythicLegend = "";
-    try {
-      if (runeCache && runeCache.length > 0) {
-        mythicLegend = runeCache
-          .filter((r) => r.grade === "신화" || r.grade === "전설")
-          .slice(0, 50)
-          .map((r) => `${r.name}(${r.grade})`)
-          .join(", ");
-      }
-    } catch {}
+    let mythicLegendRunes = "";
+    if (runeCache.length > 0) {
+      const filtered = runeCache.filter(r => r.grade === "신화" || r.grade === "전설");
+      mythicLegendRunes = filtered.map(r => `${r.name} (${r.grade})`).join(", ");
+    }
 
     const prompt = `
-너는 '뇽봇'이라는 이름의 AI야.
-너는 마비노기 모바일 전문 도우미 '뇽봇'이야. 룬, 어비스, 이벤트 정보를 알려줘:
-관련 룬 데이터: ${mythicLegend}
-질문: ${question}
+    너는 '여정&동행 봇'이야. 마비노기 모바일의 룬, 장비, 패치 정보를 귀엽게 알려줘.
+    질문: ${question}
+    참고룬: ${mythicLegendRunes}
+    `;
 
-너는 다목적 AI 어시스턴트 '뇽봇'이야.
-   사람처럼 자연스럽고 따뜻하게 대답해. 
-   답변은 60자 이내로, 짧고 간결하지만 친절하게 답해.
-   가끔 문장 끝에만 ‘뇽’을 붙여 말해도 좋아. 예를 들어 "좋아요!" → "좋다뇽!" 정도로.  
-   너는 사랑스럽고 귀여운 캐릭터야.
-   질문: ${question}
-   `;
-
-    const resp = await fetch(apiUrl, {
+    const response = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     });
 
-    const data = await resp.json();
-    const answer =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
-      "응답이 없어요.";
-
+    const data = await response.json();
+    const answer = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "응답이 없어요.";
     res.json({ ok: true, answer });
   } catch (err) {
     res.json({ ok: false, error: err.message });
@@ -291,193 +213,78 @@ app.get("/ask", async (req, res) => {
 });
 
 // =======================
-// 🔔 라사 서버 어비스/센마이 평원 감지 + Discord Embed 알림 (자동 라사 전환 통합 버전)
+// 🔹 룬 검색 API
 // =======================
-async function checkAbyssAndNotify() {
-  const browser = await launchBrowser();
-  lastAbyssCheckAt = new Date().toISOString();
+app.get("/runes", (req, res) => {
+  const name = req.query.name?.trim();
+  if (!name) return res.json({ ok: false, error: "name parameter required" });
 
-  try {
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
-    );
+  const normalized = name.replace(/\s+/g, "").toLowerCase();
+  const matches = runeCache.filter(r =>
+    r.name.replace(/\s+/g, "").toLowerCase().includes(normalized)
+  );
 
-    // ✅ mabimobi.life 접속
-    await page.goto("https://mabimobi.life/", {
-      waitUntil: "domcontentloaded",
-      timeout: 180000,
-    });
-
-    // Cloudflare 회피 대기
-    await new Promise((r) => setTimeout(r, 5000));
-
-    // 💡 서버 자동 전환: 기본이 데이안이면 '라사'로 변경
-    try {
-      const serverBtn = await page.$("button[role='combobox']");
-      if (serverBtn) {
-        await serverBtn.click();
-        await new Promise((r) => setTimeout(r, 500));
-        await page.evaluate(() => {
-          const options = Array.from(document.querySelectorAll("div[role='option'],button"));
-          const rasa = options.find((el) => el.innerText.includes("라사"));
-          if (rasa) rasa.click();
-        });
-        console.log("🔁 서버를 라사로 전환했습니다.");
-        await new Promise((r) => setTimeout(r, 2000)); // 전환 안정화 대기
-      }
-    } catch (e) {
-      console.log("⚠️ 서버 전환 중 오류 (무시 가능):", e.message);
-    }
-
-    // 🧩 상태 파싱
-    const status = await page.evaluate(() => {
-      const result = {
-        server: null,
-        connected: false,
-        abyss: { active: false, status: "", color: "" },
-        senmai: { active: false, status: "", color: "" },
-      };
-
-      // 서버명
-      result.server =
-        document
-          .querySelector("button[role='combobox'] span[data-slot='select-value']")
-          ?.innerText?.trim() || "";
-
-      // 연결 상태
-      const indicator = document.querySelector("div[title]");
-      if (indicator && indicator.getAttribute("title")?.includes("연결")) {
-        result.connected = true;
-      }
-
-      // 던전 카드 탐색
-      const tiles = Array.from(document.querySelectorAll("div.grid div.w-full"));
-      for (const tile of tiles) {
-        const name = tile.innerText.trim();
-        const isActive = !tile.className.includes("opacity-50");
-        const color = tile.style.backgroundColor || "";
-        const label = tile.innerText.includes("예상")
-          ? "예상"
-          : tile.innerText.includes("출현")
-          ? "출현"
-          : "";
-
-        if (name.includes("어비스")) {
-          result.abyss = { active: isActive, status: label, color };
-        }
-        if (name.includes("센마이")) {
-          result.senmai = { active: isActive, status: label, color };
-        }
-      }
-
-      return result;
-    });
-
-    console.log("🌍 감지 결과:", status);
-
-    // 서버가 라사인지 확인
-    if (status.server !== "라사") {
-      console.log(`⚠️ 현재 서버가 라사가 아닙니다 (${status.server || "미검출"})`);
-      return;
-    }
-
-    // 연결 안됨 → 무시
-    if (!status.connected) {
-      console.log("⚠️ 사이트 연결이 불안정합니다 (재시도 대기)");
-      return;
-    }
-
-    const now = Date.now();
-    const embeds = [];
-
-    // 🟣 어비스 구멍 감지
-    if (
-      status.abyss.active &&
-      (!lastSeen.abyss || now - lastSentAt.abyss > DEDUP_WINDOW_MS)
-    ) {
-      lastSentAt.abyss = now;
-      embeds.push({
-        title: "🟣 라사서버 어비스 구멍 감지됨!",
-        description: `**상태:** ${status.abyss.status || "활성화됨"}\n**시간:** ${new Date().toLocaleString("ko-KR")}`,
-        color: 0x9b59b6,
-        footer: { text: "어비스봇 시스템" },
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    // 🟡 센마이 평원 감지
-    if (
-      status.senmai.active &&
-      (!lastSeen.senmai || now - lastSentAt.senmai > DEDUP_WINDOW_MS)
-    ) {
-      lastSentAt.senmai = now;
-      embeds.push({
-        title: "🟡 라사서버 센마이평원 심구 감지됨!",
-        description: `**상태:** ${status.senmai.status || "활성화됨"}\n**시간:** ${new Date().toLocaleString("ko-KR")}`,
-        color: 0xf1c40f,
-        footer: { text: " 어비스봇 시스템" },
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    // 상태 갱신
-    lastSeen.abyss = status.abyss.active;
-    lastSeen.senmai = status.senmai.active;
-
-    // 디스코드 전송
-    if (embeds.length > 0) {
-      const payload = {
-        username: "어비스 감지봇",
-        embeds,
-      };
-
-      const resp = await fetch(DISCORD_WEBHOOK, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!resp.ok) {
-        console.error("❌ Discord 전송 실패:", await resp.text());
-      } else {
-        console.log("📣 Discord Embed 전송 완료:", embeds.map((e) => e.title).join(", "));
-      }
-    } else {
-      console.log("ℹ️ 보낼 새 알림 없음.");
-    }
-  } catch (err) {
-    console.error("❌ 어비스 체크 실패:", err.message);
-  } finally {
-    try {
-      await browser.close();
-    } catch {}
-  }
-}
-
-
-
-// 수동 트리거
-app.get("/admin/abyss-check", async (req, res) => {
-  try {
-    await checkAbyssAndNotify();
-    res.json({ ok: true, checkedAt: lastAbyssCheckAt, lastSeen, lastSentAt });
-  } catch (e) {
-    res.json({ ok: false, error: e.message });
-  }
+  if (matches.length === 0) return res.json({ ok: false, error: "Not found" });
+  res.json({ ok: true, rune: matches[0], count: matches.length });
 });
 
 // =======================
-// 🚀 서버 시작 + 어비스 폴링 시작
+// 🧩 관리용 엔드포인트
 // =======================
-app.listen(PORT, async () => {
-  console.log(`✅ Server running on :${PORT}`);
-  console.log("💤 룬 자동 크롤링은 꺼져 있음(수동 /admin/crawl-now).");
+app.get("/admin/crawl-now", async (req, res) => {
+  try {
+    const count = await crawlRunes();
+    res.json({ ok: true, count, message: `${count}개의 룬 데이터를 저장했습니다.` });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
 
-  // 5분마다 어비스/센마이 감지
-  const intervalMs = 5 * 60 * 1000;
-  console.log(`🕒 어비스 감지 타이머 시작: ${intervalMs / 60000}분 간격`);
-  // 즉시 1회 실행 후, 주기 반복
-  checkAbyssAndNotify();
-  setInterval(checkAbyssAndNotify, intervalMs);
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    runes: runeCache.length,
+    lastLoadedAt,
+    abyssState: lastSentState,
+    lastNotifiedAt,
+  });
+});
+
+// =======================
+// 🔔 카카오봇 Webhook 수신부
+// =======================
+app.post("/webhook", express.json(), (req, res) => {
+  const { message } = req.body;
+  console.log("📥 Render Webhook 수신:", message);
+
+  // 실제 카카오봇 연동 (이 부분은 카카오봇 쪽에서 fetch로 처리 가능)
+  // 현재는 단순히 로그로 출력
+  res.json({ ok: true, received: message });
+});
+
+// =======================
+// 🌐 어비스 확인 / UptimeRobot Ping
+// =======================
+app.get("/abyss", async (req, res) => {
+  try {
+    const info = await crawlAbyssStatus();
+    res.json({ ok: true, info, lastSentState, lastNotifiedAt });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/abyss/ping", (req, res) => {
+  checkAbyssAuto();
+  res.send("✅ Abyss auto-check triggered");
+});
+
+// =======================
+// 🚀 서버 시작
+// =======================
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log("💤 Starter 플랜 — UptimeRobot + Webhook 기반 감시 활성화");
+  checkAbyssAuto();
+  setInterval(checkAbyssAuto, 1000 * 60 * 5);
 });
