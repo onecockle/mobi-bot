@@ -77,61 +77,65 @@ async function sendDiscord(text) {
 
 // 🔄 룬 크롤링 (수정 버전)
 async function crawlRunes() {
-  console.log("🔄 Puppeteer 크롤링 시작...");
+  console.log("🔄 룬 크롤링 시작...");
   const browser = await launchBrowser();
   const page = await browser.newPage();
 
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+  );
+
   await page.goto("https://mabimobi.life/runes?t=search", {
-    waitUntil: "domcontentloaded",
+    waitUntil: "networkidle2",
     timeout: 180000,
   });
-  await new Promise((r) => setTimeout(r, 7000));
 
-  console.log("🌐 페이지 로드 완료 — 전체 스크롤 시작...");
+  // Cloudflare 우회 대기
+  await new Promise((r) => setTimeout(r, 5000));
 
-  // 🟩 모든 룬이 로드될 때까지 자동 스크롤
+  // 🟩 무한 스크롤 (끝까지)
   let prevHeight = 0;
   while (true) {
     const height = await page.evaluate("document.body.scrollHeight");
-    if (height === prevHeight) break; // 더 이상 로드할 게 없으면 종료
-    prevHeight = height;
     await page.evaluate("window.scrollTo(0, document.body.scrollHeight)");
-    await new Promise((r) => setTimeout(r, 1500)); // 로드 대기
+    await new Promise((r) => setTimeout(r, 1200));
+
+    const newHeight = await page.evaluate("document.body.scrollHeight");
+    if (newHeight === prevHeight) break; // 더 이상 로드 안됨
+    prevHeight = newHeight;
   }
 
-  console.log("✅ 전체 스크롤 완료 — 룬 데이터 추출 중...");
+  console.log("✅ 스크롤 완료 — 데이터 추출 중...");
 
   const runeData = await page.evaluate(() => {
     const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
     return rows.map((row) => {
-      const imgTag = row.querySelector("img");
-      const img = imgTag
-        ? imgTag.src.replace(
-            /^\/_next\/image\?url=/,
-            "https://mabimobi.life/_next/image?url="
-          )
-        : "";
-      const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
-      const nameEl =
-        row.querySelector(
-          "td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']"
-        ) || row.querySelector("td:nth-child(3) span:last-child");
-      const name = nameEl ? nameEl.innerText.trim() : "";
-      const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
-      const effect = row.querySelectorAll("td")[4]?.innerText.trim() || "";
+      const img =
+        row.querySelector("td:nth-child(1) img")?.src || "";
+      const category =
+        row.querySelector("td:nth-child(2)")?.innerText.trim() || "";
+      const name =
+        row.querySelector("td:nth-child(3) span:last-child")?.innerText.trim() || "";
+      const grade =
+        row.querySelector("td:nth-child(4)")?.innerText.trim() || "";
+      const effect =
+        row.querySelector("td:nth-child(5) span")?.innerText.trim() || "";
       return { name, category, grade, effect, img };
-    });
+    }).filter(r => r.name && r.effect);
   });
 
   await browser.close();
 
+  // ✅ 결과 저장
+  console.log(`📦 수집된 룬 개수: ${runeData.length}`);
   runeCache = runeData;
   lastLoadedAt = new Date().toISOString();
   fs.writeFileSync(RUNE_JSON_PATH, JSON.stringify(runeData, null, 2));
-  console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
+  console.log("💾 runes.json 저장 완료 ✅");
 
   return runeData.length;
 }
+
 
 
 // 서버 기동 시 디스크 캐시 복구
