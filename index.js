@@ -91,7 +91,7 @@ async function crawlRunes() {
   });
 
   // Cloudflare 우회 대기
-  await new Promise((r) => setTimeout(r, 5000));
+  await new Promise((r) => setTimeout(r, 12000));
 
   // 🟩 무한 스크롤 (끝까지)
   let prevHeight = 0;
