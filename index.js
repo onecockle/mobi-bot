@@ -75,47 +75,34 @@ async function sendDiscord(text) {
 
 
 
-// =======================
-// 🔄 룬 크롤링 (수동 전용)
-// =======================
+// 🔄 룬 크롤링 (수정 버전)
 async function crawlRunes() {
   console.log("🔄 Puppeteer 크롤링 시작...");
-  console.log("🧭 Chrome Path:", process.env.PUPPETEER_EXECUTABLE_PATH);
-
   const browser = await launchBrowser();
   const page = await browser.newPage();
 
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-  );
-
-  console.log("🌐 사이트 접속 중...");
   await page.goto("https://mabimobi.life/runes?t=search", {
     waitUntil: "domcontentloaded",
     timeout: 180000,
   });
-
-  // Cloudflare 회피 대기
   await new Promise((r) => setTimeout(r, 7000));
 
-  try {
-    await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 40000 });
-  } catch {
-    await browser.close();
-    throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
+  console.log("🌐 페이지 로드 완료 — 전체 스크롤 시작...");
+
+  // 🟩 모든 룬이 로드될 때까지 자동 스크롤
+  let prevHeight = 0;
+  while (true) {
+    const height = await page.evaluate("document.body.scrollHeight");
+    if (height === prevHeight) break; // 더 이상 로드할 게 없으면 종료
+    prevHeight = height;
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)");
+    await new Promise((r) => setTimeout(r, 1500)); // 로드 대기
   }
 
-  const html = await page.content();
-  if (html.includes("Just a moment")) {
-    await browser.close();
-    throw new Error("⚠️ Cloudflare challenge detected. Try again later.");
-  }
+  console.log("✅ 전체 스크롤 완료 — 룬 데이터 추출 중...");
 
-  console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
   const runeData = await page.evaluate(() => {
-    const rows = Array.from(
-      document.querySelectorAll('tr[data-slot="table-row"]')
-    );
+    const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
     return rows.map((row) => {
       const imgTag = row.querySelector("img");
       const img = imgTag
@@ -124,18 +111,14 @@ async function crawlRunes() {
             "https://mabimobi.life/_next/image?url="
           )
         : "";
-
       const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
-
       const nameEl =
         row.querySelector(
           "td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']"
         ) || row.querySelector("td:nth-child(3) span:last-child");
       const name = nameEl ? nameEl.innerText.trim() : "";
-
       const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
       const effect = row.querySelectorAll("td")[4]?.innerText.trim() || "";
-
       return { name, category, grade, effect, img };
     });
   });
@@ -149,6 +132,7 @@ async function crawlRunes() {
 
   return runeData.length;
 }
+
 
 // 서버 기동 시 디스크 캐시 복구
 try {
