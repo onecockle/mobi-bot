@@ -1,224 +1,190 @@
 // =======================
-// index.js (자동 복원 + 수동 크롤링 안정 버전)
+// index.js (GitHub JSON + 캐시 복원 + /runes + /ask)
+// - GitHub의 runes.json 원격 로드 (수동 크롤링 제거)
+// - 디스크 캐시(fallback) 자동 복원/저장
+// - /runes: 이름 부분검색 API
+// - /ask: Gemini 프록시 (룬 요약 일부 주입)
+// - /admin/reload: GitHub에서 즉시 재로딩
 // =======================
 
 import express from "express";
-import puppeteer from "puppeteer";
 import fs from "fs";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// ===== ENV =====
+// 필요 시 Render → Environment에 설정 가능
+const GEMINI_API_KEY =
+  process.env.GEMINI_API_KEY || ""; // 없으면 /ask 비활성 처리
+const RUNE_JSON_URL =
+  process.env.RUNE_JSON_URL ||
+  "https://raw.githubusercontent.com/onecockle/mobi-bot/main/runes.json"; // <- 사용자의 GitHub 기본값
+
+// ===== 상태/캐시 =====
 let runeCache = [];
 let lastLoadedAt = null;
-const CACHE_FILE = "runes.json";
+const CACHE_FILE = "runes.json"; // 디스크 캐시 (fallback)
 
 // =======================
-// 🧩 캐시 자동 복원
+// 공용: GitHub에서 룬 로드 (+디스크 저장)
 // =======================
-function loadCache() {
+async function fetchRunesFromGitHub() {
+  const res = await fetch(RUNE_JSON_URL, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  }
+  const data = await res.json();
+  if (!Array.isArray(data)) {
+    throw new Error("JSON 형식 오류: 배열이 아님");
+  }
+  return data;
+}
+
+function loadRunesFromDisk() {
+  if (!fs.existsSync(CACHE_FILE)) return null;
   try {
-    if (fs.existsSync(CACHE_FILE)) {
-      const data = fs.readFileSync(CACHE_FILE, "utf-8");
-      const parsed = JSON.parse(data);
-      runeCache = parsed;
-      lastLoadedAt = new Date().toISOString();
-      console.log(`💾 캐시 복원 완료 — ${parsed.length}개의 룬 불러옴`);
-    } else {
-      console.log("⚠️ 캐시 파일이 없습니다. 수동 크롤링 필요");
-    }
-  } catch (err) {
-    console.error("❌ 캐시 로드 실패:", err.message);
+    const raw = fs.readFileSync(CACHE_FILE, "utf8");
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) return null;
+    return data;
+  } catch {
+    return null;
   }
 }
 
-// =======================
-// 🔄 룬 크롤링 함수
-// =======================
-async function crawlRunes() {
-  console.log("🔄 Puppeteer 크롤링 시작...");
-  console.log("🧭 Chrome Path:", process.env.PUPPETEER_EXECUTABLE_PATH);
-
-  const browser = await puppeteer.launch({
-    headless: "new",
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-extensions",
-      "--disable-gpu",
-      "--single-process",
-    ],
-  });
-
-  const page = await browser.newPage();
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-  );
-
-  console.log("🌐 사이트 접속 중...");
-  await page.goto("https://mabimobi.life/runes?t=search", {
-    waitUntil: "domcontentloaded",
-    timeout: 180000,
-  });
-
-  // Cloudflare 회피 대기
-  await new Promise((resolve) => setTimeout(resolve, 12000));
-
-  // 룬 테이블 로드 대기
+function saveRunesToDisk(data) {
   try {
-    await page.waitForSelector('tr[data-slot="table-row"]', { timeout: 40000 });
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2), "utf8");
   } catch (e) {
-    throw new Error("⚠️ 룬 테이블을 찾지 못했습니다 (Cloudflare 또는 로딩 지연)");
+    console.warn("⚠️ 디스크 캐시 저장 실패:", e.message);
   }
+}
 
-  const html = await page.content();
-  if (html.includes("Just a moment")) {
-    throw new Error("⚠️ Cloudflare challenge detected. Try again later.");
+async function loadRunesOnStartup() {
+  // 1) GitHub 시도 → 2) 실패 시 디스크 fallback
+  try {
+    const data = await fetchRunesFromGitHub();
+    runeCache = data;
+    lastLoadedAt = new Date().toISOString();
+    saveRunesToDisk(data);
+    console.log(`✅ GitHub에서 ${data.length}개 룬 로드 완료`);
+  } catch (e) {
+    console.warn("⚠️ GitHub 로드 실패:", e.message);
+    const local = loadRunesFromDisk();
+    if (local) {
+      runeCache = local;
+      lastLoadedAt = new Date().toISOString() + " (from-disk)";
+      console.log(`💾 디스크 캐시에서 ${local.length}개 룬 복원`);
+    } else {
+      console.error("❌ 룬 데이터를 로드할 수 없습니다 (원격/로컬 모두 실패)");
+    }
   }
-
-  console.log("✅ 페이지 로드 성공 — 룬 데이터 추출 중...");
-
-  const runeData = await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll('tr[data-slot="table-row"]'));
-    return rows.map((row) => {
-      const imgTag = row.querySelector("img");
-      const img = imgTag
-        ? imgTag.src.replace(/^\/_next\/image\?url=/, "https://mabimobi.life/_next/image?url=")
-        : "";
-
-      const category = row.querySelectorAll("td")[1]?.innerText.trim() || "";
-
-      const nameEl =
-        row.querySelector("td:nth-child(3) span[class*='text-[rgba(235,165,24,1)]']") ||
-        row.querySelector("td:nth-child(3) span:last-child");
-      const name = nameEl ? nameEl.innerText.trim() : "";
-
-      const grade = row.querySelectorAll("td")[3]?.innerText.trim() || "";
-      const effect = row.querySelectorAll("td")[4]?.innerText.trim() || "";
-
-      return { name, category, grade, effect, img };
-    });
-  });
-
-  await browser.close();
-
-  runeCache = runeData;
-  lastLoadedAt = new Date().toISOString();
-
-  fs.writeFileSync(CACHE_FILE, JSON.stringify(runeData, null, 2));
-  console.log(`✅ ${runeData.length}개의 룬을 저장했습니다.`);
-
-  return runeData.length;
 }
 
 // =======================
-// 🧩 API 라우트
+// 유틸: 부분검색 (공백/대소문자 무시)
+// =======================
+function norm(s = "") {
+  return String(s).replace(/\s+/g, "").toLowerCase();
+}
+
+// =======================
+// 라우트
 // =======================
 
-// 🔹 수동 크롤링 실행
-app.get("/admin/crawl-now", async (req, res) => {
-  try {
-    const count = await crawlRunes();
-    res.json({ ok: true, count, message: `${count}개의 룬 데이터가 새로 저장되었습니다.` });
-  } catch (error) {
-    console.error("❌ 크롤링 실패:", error);
-    res.json({ ok: false, error: error.message });
-  }
-});
-
-// 🔹 룬 검색
-app.get("/runes", (req, res) => {
-  const name = req.query.name?.trim();
-  if (!name) return res.json({ ok: false, error: "name parameter required" });
-
-  const normalizedQuery = name.replace(/\s+/g, "").toLowerCase();
-
-  const matches = runeCache.filter((r) => {
-    const normalizedRune = r.name.replace(/\s+/g, "").toLowerCase();
-    return normalizedRune.includes(normalizedQuery);
-  });
-
-  if (matches.length === 0) {
-    return res.json({ ok: false, error: "Not found" });
-  }
-
-  const main = matches[0];
-  res.json({ ok: true, rune: main, count: matches.length });
-});
-
-// 🔹 서버 상태
+// 헬스
 app.get("/health", (req, res) => {
   res.json({
     ok: true,
     items: runeCache.length,
     lastLoadedAt,
+    source: RUNE_JSON_URL,
   });
 });
 
-// 🔹 Gemini AI 프록시
+// 룬 검색 (이름 부분검색, 첫 매치 반환 + 총 매치수)
+app.get("/runes", (req, res) => {
+  const name = req.query.name?.trim();
+  if (!name) return res.json({ ok: false, error: "name parameter required" });
+
+  const q = norm(name);
+  const matches = runeCache.filter((r) => norm(r.name).includes(q));
+
+  if (matches.length === 0) {
+    return res.json({ ok: false, error: "Not found" });
+  }
+  const main = matches[0];
+  res.json({ ok: true, rune: main, count: matches.length });
+});
+
+// GitHub에서 즉시 재로딩 (수동 갱신)
+app.get("/admin/reload", async (req, res) => {
+  try {
+    const data = await fetchRunesFromGitHub();
+    runeCache = data;
+    lastLoadedAt = new Date().toISOString();
+    saveRunesToDisk(data);
+    res.json({ ok: true, count: data.length, at: lastLoadedAt });
+    console.log(`🔄 수동 재로딩 완료 — ${data.length}개`);
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// Gemini 프록시 (/ask)
+// - GEMINI_API_KEY가 없으면 에러 반환
 app.get("/ask", async (req, res) => {
-  const question = req.query.question;
+  const question = req.query.question?.trim();
   if (!question) return res.json({ ok: false, error: "question parameter required" });
+  if (!GEMINI_API_KEY) return res.json({ ok: false, error: "GEMINI_API_KEY is not set" });
+
+  // 신화/전설 일부를 프롬프트에 보강(있으면)
+  let mythicLegend = "";
+  try {
+    if (Array.isArray(runeCache) && runeCache.length > 0) {
+      mythicLegend = runeCache
+        .filter((r) => r.grade === "신화" || r.grade === "전설")
+        .slice(0, 50)
+        .map((r) => `${r.name}(${r.grade})`)
+        .join(", ");
+    }
+  } catch {}
+
+  const prompt = `
+너는 '여정&동행 봇'이야. 마비노기 모바일 정보를 친근하게 알려줘.
+룬에 관해 물으면 이름/분류/등급/효과를 정확히 설명해.
+아래는 신화/전설 일부 목록이야(있으면 참고만 해):
+${mythicLegend || "(데이터 없음)"}
+
+답변은 100자 이내로 자연스럽게. 가끔 어미에 '뇽'을 붙여도 돼.
+질문: ${question}
+`.trim();
 
   try {
     const apiUrl =
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
-      process.env.GEMINI_API_KEY;
+      GEMINI_API_KEY;
 
-    let mythicLegendRunes = "";
-    try {
-      if (runeCache && runeCache.length > 0) {
-        const filtered = runeCache.filter((r) => r.grade === "신화" || r.grade === "전설");
-        if (filtered.length > 0) {
-          mythicLegendRunes = filtered.map((r) => `${r.name} (${r.grade})`).join(", ");
-        } else {
-          mythicLegendRunes = "현재 신화/전설 등급 룬 데이터를 불러오지 못했뇽!";
-        }
-      }
-    } catch (err) {
-      console.warn("⚠️ runeCache 필터링 실패:", err.message);
-    }
-
-    const prompt = `
-너는 '여정&동행 봇'이라는 이름의 AI야.
-마비노기 모바일 게임의 전문 지식을 가진 친구야.
-게임 시스템, 룬, 장비, 클래스, 몬스터, 조합, 패치 등 모든 게임 정보를 이해하고 답변할 수 있어.
-룬에 대해 물어보면 룬이름, 분류, 등급, 효과를 정확히 설명해줘.
-아래는 현재 신화 및 전설 등급 룬 데이터야:
-${mythicLegendRunes}
-
-공식 정보처럼 정확하게 설명하되, 문장은 귀엽고 친근하게 써.
-가끔 문장 끝에만 ‘뇽’을 붙여 말해도 좋아.
-너는 퉁명스럽지만 장난끼 많고 귀여운 캐릭터야.
-답변은 100자 이내로 짧고 자연스럽게 써.
-`;
-
-    const response = await fetch(apiUrl, {
+    const resp = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-      }),
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
     });
 
-    const data = await response.json();
-    const answer = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-    const fallback = "팍씨! 답하기 쉽게 물어보라뇽 💬";
-    const finalAnswer = answer && answer.length > 10 ? answer : fallback;
-
-    res.json({ ok: true, answer: finalAnswer });
+    const data = await resp.json();
+    const answer = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    res.json({ ok: true, answer: answer || "응답이 없어요." });
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
 });
 
 // =======================
-// 🚀 서버 시작
+// 서버 시작
 // =======================
 app.listen(PORT, async () => {
   console.log(`✅ Server running on :${PORT}`);
-  loadCache(); // 💾 캐시 자동 복원
-  console.log("💤 자동 크롤링 비활성화됨 — 수동 실행만 허용됩니다.");
+  await loadRunesOnStartup();
+  console.log("💤 자동 크롤링은 제거됨 — GitHub JSON만 사용합니다.");
 });
